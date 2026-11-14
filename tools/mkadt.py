@@ -52,7 +52,7 @@ PIXEL1 = dict(
 # Apply with --oneplus3 (implies --pixel1 and overrides PIXEL1 fields).
 ONEPLUS3 = dict(
     phys_base=0x100000000, mem_size=0xbd8c0000,  # whole >4 GiB bank, no carve-outs in /proc/iomem
-    fb=0x83401000, fb_size=0x23ff000, fb_w=1080, fb_h=1920, fb_bpp=32,
+    fb=0x83401000, fb_size=0x23ff000, fb_w=1080, fb_h=1920, fb_bpp=24,
     cpus=[(0x0, 0, 2188800000), (0x1, 0, 2188800000),
           (0x100, 1, 2342400000), (0x101, 1, 2342400000)],
 )

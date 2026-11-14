@@ -7,7 +7,7 @@
 #define FB_W		1080
 #define FB_H		1920
 #ifndef OP3_BPP
-#define OP3_BPP		4		/* verified Test 5: 3T aboot splash is 32bpp */
+#define OP3_BPP		3		/* kernel console proven crisp at 24bpp (Test 8); 32bpp garbled it */
 #endif
 #define FB_BPP		OP3_BPP
 #elif defined(PIXEL1)

@@ -1,0 +1,25 @@
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -170,4 +170,23 @@
+ 	sweet_log_putc('\n');
+ 	__asm__ volatile("dsb sy" ::: "memory");
++	/*
++	 * OnePlus 3T: the shim's APSS watchdog bite is a cold reset that
++	 * wipes the ramoops log. A PSCI SYSTEM_RESET is a warm reset (Test 2),
++	 * so after a 20 s pause (screen readable) reset ourselves and let
++	 * Linux/TWRP show the panic text in /sys/fs/pstore/console-ramoops.
++	 */
++	{
++		uint64_t f, t0, t;
++		__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
++		__asm__ volatile("mrs %0, cntpct_el0" : "=r"(t0));
++		do {
++			__asm__ volatile("mrs %0, cntpct_el0" : "=r"(t));
++		} while (t - t0 < f * 20);
++		register uint64_t x0 __asm__("x0") = 0x84000009ULL;	/* PSCI SYSTEM_RESET */
++		__asm__ volatile("dsb sy; smc #0" : "+r"(x0) : : "memory");
++		for (;;) {
++			__asm__ volatile("wfe");
++		}
++	}
+ }
