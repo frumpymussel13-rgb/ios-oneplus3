@@ -9,7 +9,8 @@ import struct, sys
 
 VIRT = 0xfffffff007004000
 PHYS = 0x100000000           # sailfish upper DDR bank, no carve-outs
-MEM = 0x7e550000
+import os
+MEM = int(os.environ.get("PAYLOAD_MEM", "0x7e550000"), 16)
 FILL_OFF = 0x100000          # shim/stub.c FILL_OFF
 M64 = (1 << 64) - 1
 

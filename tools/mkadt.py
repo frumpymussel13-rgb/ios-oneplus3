@@ -47,6 +47,16 @@ PIXEL1 = dict(
           (0x100, 1, 2150400000), (0x101, 1, 2150400000)],
 )
 
+# OnePlus 3T (oneplus3, MSM8996pro): same SoC blocks as the Pixel 1 (GIC, UFS, MPIDRs
+# verified from the 3T's live FDT), different DRAM, framebuffer and clocks.
+# Apply with --oneplus3 (implies --pixel1 and overrides PIXEL1 fields).
+ONEPLUS3 = dict(
+    phys_base=0x100000000, mem_size=0xbd8c0000,  # whole >4 GiB bank, no carve-outs in /proc/iomem
+    fb=0x83401000, fb_size=0x23ff000, fb_w=1080, fb_h=1920, fb_bpp=32,
+    cpus=[(0x0, 0, 2188800000), (0x1, 0, 2188800000),
+          (0x100, 1, 2342400000), (0x101, 1, 2342400000)],
+)
+
 BOOT_MANIFEST_HASH = hashlib.sha384(b'sweet boot manifest').digest()
 
 # The iOS userland is the iPhone X (iPhone10,3 / D22AP) IPSW. MobileGestalt
@@ -292,7 +302,7 @@ def build(seed=None, qemu=False, highmem=False, pixel1=False):
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
     # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
     # Pixel 1 keeps 'xiaomi,sweet' for the same kernel matching (one platform expert).
-    ident = (('D20AP', 'iPhone10,1', 'D20', 'google,sailfish', 'qcom,msm8996') if pixel1 else
+    ident = (('D20AP', 'iPhone10,1', 'D20', ('oneplus,oneplus3' if '--oneplus3' in sys.argv else 'google,sailfish'), 'qcom,msm8996') if pixel1 else
              ('D22AP', 'iPhone10,3', 'D22', 'xiaomi,sweet', 'qcom,sm7150'))
     compat = cstr(ident[0]) + cstr(ident[1]) + cstr('xiaomi,sweet')
     if pixel1:
@@ -310,6 +320,9 @@ def build(seed=None, qemu=False, highmem=False, pixel1=False):
 
 
 if __name__ == '__main__':
+    if '--oneplus3' in sys.argv:
+        PIXEL1.update(ONEPLUS3)
+        sys.argv.append('--pixel1')
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, pixel1='--pixel1' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)

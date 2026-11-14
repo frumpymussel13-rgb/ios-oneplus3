@@ -1,7 +1,16 @@
 #pragma once
 #include <stdint.h>
 
-#ifdef PIXEL1
+#ifdef ONEPLUS3
+/* OnePlus 3T: reserved cont_splash_mem@83401000 (live FDT), 1080x1920 */
+#define FB_BASE		0x83401000UL
+#define FB_W		1080
+#define FB_H		1920
+#ifndef OP3_BPP
+#define OP3_BPP		4		/* verified Test 5: 3T aboot splash is 32bpp */
+#endif
+#define FB_BPP		OP3_BPP
+#elif defined(PIXEL1)
 #define FB_BASE		0xc0001000UL	/* cont_splash_mem = MDP VIG0 SRC0_ADDR */
 #define FB_W		1080
 #define FB_H		1920

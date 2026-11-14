@@ -5,6 +5,7 @@
  */
 #include <stdint.h>
 #include "pstore.h"
+#include "console.h"
 
 __asm__(".section .text.head, \"ax\"\n"
 	".globl _head\n"
@@ -59,7 +60,28 @@ void __attribute__((noreturn)) stub_main(volatile struct boot_args *ba)
 		sum = sum * 31 + *(volatile uint64_t *)(ba->physBase + FILL_OFF + off);
 	plog_hex("  got sum", sum);
 
+	uint64_t exp = 0;
+	for (const char *p = line; *p; p++)
+		if (p[0] == 's' && p[1] == 'u' && p[2] == 'm' && p[3] == '=')
+			for (p += 4; *p && *p != ' '; p++)
+				exp = exp << 4 | (*p <= '9' ? *p - '0' : *p - 'a' + 10);
 	plog_str("STUB: done, PSCI reset\n");
+	/* screen is the reliable channel on the 3T: show the result for 40 s */
+	con_clear(sum == exp ? GREEN : RED);
+	con_str("STUB", sum == exp ? "CHECKSUM OK" : "CHECKSUM BAD");
+	con_hex("physBase", ba->physBase);
+	con_hex("memSize", ba->memSize);
+	con_hex("top", ba->topOfKernelData);
+	con_hex("sum got", sum);
+	con_hex("sum exp", exp);
+	con_hex("adtLen", ba->deviceTreeLength);
+	con_flush();
+	{
+		uint64_t f, t0, t;
+		__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+		__asm__ volatile("mrs %0, cntpct_el0" : "=r"(t0));
+		do { __asm__ volatile("mrs %0, cntpct_el0" : "=r"(t)); } while (t - t0 < f * 40);
+	}
 	register uint64_t x0 __asm__("x0") = 0x84000009UL;	/* SYSTEM_RESET */
 	__asm__ volatile("dsb sy; smc #0" : "+r"(x0) : : "memory");
 	for (;;)

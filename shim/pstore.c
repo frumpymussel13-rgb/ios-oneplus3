@@ -7,8 +7,14 @@
  */
 #include "pstore.h"
 
+#ifdef ONEPLUS3
+/* 3T ramoops@0xac000000 2 MiB: 4 x 128K dump, 1 MiB console, 512K pmsg (live module params) */
+#define PRZ_BASE	0xac080000UL
+#define PRZ_DATA_MAX	(0x100000UL - 12)
+#else
 #define PRZ_BASE	0x83540000UL
 #define PRZ_DATA_MAX	(0x80000UL - 12)
+#endif
 #define PRZ_SIG		0x43474244U	/* "DBGC" */
 
 #define PRZ_W(off)	(*(volatile uint32_t *)(PRZ_BASE + (off)))
