@@ -1,0 +1,13 @@
+name: probe
+on:
+  push:
+    branches: [probe]
+jobs:
+  p:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-13, macos-14, macos-15, macos-26, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: sw_vers; uname -m; ls -d /Applications/Xcode*.app
