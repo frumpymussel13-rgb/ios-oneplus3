@@ -1,0 +1,12 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -1000,9 +1000,12 @@
+ 	int err = EOPNOTSUPP;
+ 	bool up = wl_net_up;
+ 	bzero(w, sizeof(w));
++	if (!set && type == 390) {              /* iOS 16 asks for CURRENT_NETWORK as 390 (1164 bytes = our scan record); 103 is the older number */
++		type = A80211_CURRENT_NETWORK;
++	}
+ 	w[0] = 1;                                       /* version */
+ 	if (set) {
+ 		switch (type) {
