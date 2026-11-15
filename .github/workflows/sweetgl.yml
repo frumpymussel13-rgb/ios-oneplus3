@@ -1,0 +1,95 @@
+name: sweetgl
+
+on:
+  push:
+    branches: [sweetgl]
+  workflow_dispatch:
+    inputs:
+      mesa_tag:
+        description: "Mesa tag to build (empty = find the one whose file blobs match tools/sweetgl/mesa.patch)"
+        default: ""
+      xcode:
+        description: "Xcode app to use (oldest installed Xcode_*.app if empty)"
+        default: ""
+
+concurrency:
+  group: sweetgl-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          brew install ninja meson pkg-config
+          python3 --version
+          XC="${{ inputs.xcode }}"
+          [ -n "$XC" ] || XC=$(ls -d /Applications/Xcode_1*.app | sort -V | head -1)
+          echo "XC=$XC" >> "$GITHUB_ENV"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          ls "$XC/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/"
+
+      - name: Python venv (mako, pyyaml, ...)
+        run: |
+          mkdir -p research/tools/bin
+          python3 -m venv research/tools/venv
+          research/tools/venv/bin/pip install --quiet mako pyyaml packaging setuptools meson ply
+          ln -sf "$(command -v ninja)" research/tools/bin/ninja
+          mkdir -p research/xcode15
+          ln -sfn "$XC" research/xcode15/Xcode.app
+
+      - name: Find and patch Mesa
+        run: |
+          set -e
+          git clone --filter=blob:none --no-checkout https://gitlab.freedesktop.org/mesa/mesa.git research/mesa
+          cd research/mesa
+          want1=$(grep -E '^index ' ../../tools/sweetgl/mesa.patch | head -1 | sed 's/index \([0-9a-f]*\)\..*/\1/')
+          echo "blob of src/freedreno/drm/freedreno_bo.c wanted: $want1"
+          tag="${{ inputs.mesa_tag }}"
+          if [ -z "$tag" ]; then
+            for t in $(git tag -l 'mesa-2[3-5].*' | grep -v -E 'rc|branchpoint' | sort -V -r); do
+              got=$(git rev-parse --short=7 "$t:src/freedreno/drm/freedreno_bo.c" 2>/dev/null || true)
+              if [ "$got" = "$want1" ]; then tag=$t; break; fi
+            done
+          fi
+          [ -n "$tag" ] || { echo "no Mesa tag matches the patch blobs"; exit 1; }
+          echo "using $tag"; echo "MESA_TAG=$tag" >> "$GITHUB_ENV"
+          git checkout -q "$tag"
+          git apply --check ../../tools/sweetgl/mesa.patch
+          git apply ../../tools/sweetgl/mesa.patch
+          git log -1 --format=%H
+
+      - name: Cross file for this runner
+        run: |
+          set -e
+          R="$PWD"
+          # the repo's cross file was written for /Volumes/SamsungSSD/ios-sailfish and iPhoneOS17.5.sdk
+          sed -i '' "s#/Volumes/SamsungSSD/ios-sailfish#$R#g; s#iPhoneOS17.5.sdk#iPhoneOS.sdk#g" tools/sweetgl/ios-cross.txt
+          ls -d "$XC/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/"iPhoneOS.sdk
+          head -3 tools/sweetgl/ios-cross.txt | cut -c1-200
+
+      - name: Configure Mesa (iOS arm64)
+        run: sh tools/sweetgl/mesa-setup.sh
+
+      - name: Build sweetgl.dylib
+        run: |
+          mkdir -p tools/sweetgl/out
+          sh tools/sweetgl/build.sh
+          ls -l tools/sweetgl/out/
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sweetgl
+          path: |
+            tools/sweetgl/out/sweetgl-unpadded.dylib
+            tools/sweetgl/out/sweetgl.dylib
+            tools/sweetgl/out/exports.txt
+            research/mesa-ios/meson-logs/meson-log.txt
+          if-no-files-found: warn
