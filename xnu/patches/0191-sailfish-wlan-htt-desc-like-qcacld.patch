@@ -1,0 +1,30 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -2549,7 +2549,7 @@
+ wl_htt_tx(const uint8_t *fr, uint32_t len, bool mgmt)
+ {
+ 	static uint32_t sel;
+-	uint32_t path = wl_mgmtpath ? wl_mgmtpath - 1 : sel++ % 3;     /* boot-arg sailfishmgmt: 1 HTT, 2 WMI 8 words, 3 WMI 7 words; 0 in turn */
++	uint32_t path = wl_mgmtpath == 9 ? sel++ % 3 : wl_mgmtpath ? wl_mgmtpath - 1 : 0;     /* boot-arg sailfishmgmt: 1 HTT, 2 WMI 8 words, 3 WMI 7 words; 0 in turn */
+ 	if (mgmt && path != 0) {
+ 		return wl_wmi_mgmt_tx(fr, len, path == 2);
+ 	}
+@@ -2564,7 +2564,8 @@
+ 		}
+ 		(void)wl_htc_poll(1);
+ 	}
+-	uint16_t flags1 = (uint16_t)((mgmt ? 17u : 16u) << 6 | 1u << 11), id = ++wl_tx_id;
++	/* qcacld htt_tx_desc_init: postponed (bit 27, "re-send of a dropped frame") and pkt_subtype stay 0; ath10k's values are quirk 256 */
++	uint16_t flags1 = (uint16_t)((mgmt ? 17u : 16u) << 6 | ((wl_quirk & 256) ? 1u << 11 : 0)), id = ++wl_tx_id;
+ 	uint32_t slot = id % WL_TXSLOTS, fo = D_TXF + 2048 * slot, lo = D_TXFRAG + 16 * slot;
+ 	uint8_t *f = (uint8_t *)(wl_dma + fo), *p = wl_htc_tx_payload(&ce4);
+ 	volatile uint32_t *frag = (volatile uint32_t *)(wl_dma + lo);
+@@ -2574,7 +2575,7 @@
+ 	frag[1] = len;
+ 	frag[2] = frag[3] = 0;
+ 	p[0] = 1;                                       /* TX_FRM */
+-	p[1] = (uint8_t)(1u | (mgmt ? 3u : 1u) << 5);   /* MAC header present, type MGMT / NATIVE_WIFI */
++	p[1] = (uint8_t)(((wl_quirk & 256) ? 1u : 0) | (mgmt ? 3u : 1u) << 5);   /* type MGMT / NATIVE_WIFI */
+ 	p[2] = flags1 & 0xff;                           /* vdev 0, ext tid, POSTPONED */
+ 	p[3] = flags1 >> 8;
+ 	p[4] = len & 0xff;
