@@ -1,0 +1,59 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -1454,7 +1454,7 @@
+ static int32_t wl_txc_id = -1;                  /* last HTT tx completion: msdu id, status */
+ static uint16_t wl_txc_n;                       /* tx completions so far (data and management) */
+ static uint32_t wl_txc_status;
+-static uint32_t wl_quirk, wl_mgmtpath, wl_rxmgmt, wl_rxbss, wl_nbcn, wl_nprobe;   /* boot-args sailfishq / sailfishmgmt; mgmt frames seen */
++static uint32_t wl_rd, wl_rdv, wl_quirk, wl_mgmtpath, wl_rxmgmt, wl_rxbss, wl_nbcn, wl_nprobe;   /* boot-args sailfishq / sailfishmgmt; mgmt frames seen */
+ static uint8_t wl_eapol[512];                   /* last EAPOL-Key frame received */
+ static uint32_t wl_eapol_len;
+ static bool wl_net_up;                          /* connected: data frames go to the IOKit interface */
+@@ -1839,6 +1839,8 @@
+ 	for (uint32_t o = 4; o + 4 <= wl_msg_len;) {
+ 		uint32_t h = le32(&wl_msg[o]), tag = h >> 16, len = h & 0xffff;
+ 		const uint8_t *v = &wl_msg[o + 4];
++		printf("SAILFISH WLAN: service ready TLV tag %#x len %u: %08x %08x %08x\n", tag, len, len >= 4 ? le32(v) : 0, len >= 8 ? le32(v + 4) : 0,
++		    len >= 12 ? le32(v + 8) : 0);
+ 		if (tag == TAG_SERVICE_READY && len >= 4 * 20) {
+ 			for (int i = 0; i < 6; i++) {
+ 				abi[i] = le32(v + 4 + 4 * i);
+@@ -2055,6 +2057,29 @@
+ 	if (!wl_wmi_send(w)) {
+ 		return false;
+ 	}
++	if (wl_rd) {
++		/* boot-args sailfishrd (1: 5 words, 2: +dfs, 3: pdev id + 5 + dfs) and sailfishrdv (domain, default 0x3a FCC3_FCCA):
++		 * ath10k_wmi_pdev_set_regdomain; never sent before, the firmware may keep every channel receive-only. */
++		uint32_t rdv = wl_rdv ? wl_rdv : 0x3a, nwd = wl_rd == 1 ? 5 : wl_rd == 2 ? 6 : 7;
++		uint32_t *w2 = w0;
++		*w2++ = 0x4001u;
++		w2 = wl_tlv(w2, 0x51u, nwd * 4);
++		if (wl_rd == 3) {
++			*w2++ = 0;                      /* pdev id */
++		}
++		*w2++ = rdv;
++		*w2++ = rdv;
++		*w2++ = rdv;
++		*w2++ = 0x10;                           /* CTL FCC */
++		*w2++ = 0x10;
++		if (wl_rd >= 2) {
++			*w2++ = 1;                      /* DFS FCC */
++		}
++		printf("SAILFISH WLAN: set regdomain %#x (%u words): %s\n", rdv, nwd, wl_wmi_send(w2) ? "sent" : "FAILED");
++		for (int i = 0; i < 20; i++) {
++			(void)wl_htc_poll(10);
++		}
++	}
+ 	ready = true;
+ 
+ scan:
+@@ -3812,6 +3837,8 @@
+ 	(void)PE_parse_boot_argn("sailfishpsk", wl_psk, sizeof(wl_psk));
+ 	(void)PE_parse_boot_argn("sailfishdrop", &wl_drop_test, sizeof(wl_drop_test));
+ 	(void)PE_parse_boot_argn("sailfishq", &wl_quirk, sizeof(wl_quirk));
++	(void)PE_parse_boot_argn("sailfishrd", &wl_rd, sizeof(wl_rd));
++	(void)PE_parse_boot_argn("sailfishrdv", &wl_rdv, sizeof(wl_rdv));
+ 	(void)PE_parse_boot_argn("sailfishmgmt", &wl_mgmtpath, sizeof(wl_mgmtpath));
+ 	if (!on) {
+ 		return;
