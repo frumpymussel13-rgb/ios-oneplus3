@@ -1,0 +1,51 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -2420,9 +2420,48 @@
+  */
+ static uint16_t wl_tx_id;
+ 
++/*
++ * Management frames by WMI_MGMT_TX_SEND (qcacld "transmit by reference"): the
++ * firmware of the 3T never answers an HTT TX_FRM of type MGMT (no TX_COMPL_IND,
++ * nothing on the air). Command: vdev, desc id, channel MHz, frame address (lo,
++ * hi), frame length, bytes inline, [tx_params_valid]; then a byte array with
++ * the first 64 bytes of the frame (ath11k_wmi_mgmt_send). Firmware versions
++ * differ on the trailing tx_params_valid word, so the variants alternate.
++ */
++#define WMI_MGMT_TX_SEND_CMDID  0x7008u
++#define TAG_MGMT_TX_SEND        0x1a6u
++static uint32_t wl_mgmt_n;
++
++static bool
++wl_wmi_mgmt_tx(const uint8_t *fr, uint32_t len)
++{
++	uint32_t fo = D_TXF + 2048 * ((uint32_t)(wl_tx_id + 1) % WL_TXSLOTS), nw = (wl_mgmt_n & 1) ? 7 : 8;
++	uint32_t inl = len < 64 ? len : 64, ch = wl_bss.ch, freq = ch <= 14 ? 2407 + 5 * ch : 5000 + 5 * ch;
++	memcpy((void *)(wl_dma + fo), fr, len);
++	uint32_t *w = wl_wmi_begin(WMI_MGMT_TX_SEND_CMDID, TAG_MGMT_TX_SEND, 4 * nw);
++	w[0] = 0;                                       /* vdev */
++	w[1] = ++wl_mgmt_n;                             /* desc id */
++	w[2] = freq;
++	w[3] = WL_DMA_PA + fo;
++	w[4] = 0;
++	w[5] = len;
++	w[6] = inl;
++	if (nw == 8) {
++		w[7] = 0;                               /* tx_params_valid */
++	}
++	w = wl_tlv(w + nw, TAG_ARRAY_BYTE, (inl + 3) & ~3u);
++	bzero(w, (inl + 3) & ~3u);
++	memcpy(w, fr, inl);
++	printf("SAILFISH WLAN: mgmt tx #%u fc %02x%02x len %u %u MHz (%u-word variant)\n", wl_mgmt_n, fr[0], fr[1], len, freq, nw);
++	return wl_wmi_send(w + ((inl + 3) >> 2));
++}
++
+ static bool
+ wl_htt_tx(const uint8_t *fr, uint32_t len, bool mgmt)
+ {
++	if (mgmt) {
++		return wl_wmi_mgmt_tx(fr, len);
++	}
+ 	/* A free slot: wait for completions while 31 frames are out (a lost completion times out). */
+ 	for (uint64_t end = wl_ms() + 50; (uint16_t)(wl_tx_id - wl_txc_n) >= WL_TXSLOTS - 1;) {
+ 		if (wl_ms() >= end) {
