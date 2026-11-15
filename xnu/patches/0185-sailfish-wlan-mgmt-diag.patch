@@ -1,0 +1,41 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -1606,6 +1606,10 @@
+ 				wl_htt_types |= 1u << f[8];
+ 				printf("SAILFISH WLAN: HTT msg type %u (%u bytes)\n", f[8], len - tl);
+ 			}
++			if (eid == wl_htt_ep && len - tl >= 1 && f[8] == 14) {
++				printf("SAILFISH WLAN: HTT type 14 (%u bytes): %02x %02x %02x %02x %02x %02x %02x %02x\n", len - tl, f[8], f[9], f[10],
++				    f[11], f[12], f[13], f[14], f[15]);
++			}
+ 			if (eid == wl_htt_ep && len - tl >= 48 && f[8] == 1) {
+ 				/*
+ 				 * HTT RX_IND: the firmware filled ring buffers in order. Per MPDU,
+@@ -2404,6 +2408,12 @@
+ 			continue;
+ 		}
+ 		const uint8_t *fr = wl_mgmt_frame(flen);
++		static uint32_t seen;
++		if (fr && fr[0] != 0x80 && fr[0] != 0x50 && seen < 60) {       /* not beacon / probe response */
++			seen++;
++			printf("SAILFISH WLAN: rx mgmt fc %02x%02x len %u a1 %02x:%02x:%02x:%02x:%02x:%02x a2 %02x:%02x:%02x:%02x:%02x:%02x\n",
++			    fr[0], fr[1], *flen, fr[4], fr[5], fr[6], fr[7], fr[8], fr[9], fr[10], fr[11], fr[12], fr[13], fr[14], fr[15]);
++		}
+ 		if (fr && fr[0] == fc && memcmp(fr + 4, wl_mac, 6) == 0 && memcmp(fr + 10, wl_bss.bssid, 6) == 0) {
+ 			return fr;
+ 		}
+@@ -2459,9 +2469,13 @@
+ static bool
+ wl_htt_tx(const uint8_t *fr, uint32_t len, bool mgmt)
+ {
+-	if (mgmt) {
++	static uint32_t sel;
++	if (mgmt && (sel++ % 3) != 0) {              /* diagnosis: HTT, WMI 8 words, WMI 7 words in turn */
+ 		return wl_wmi_mgmt_tx(fr, len);
+ 	}
++	if (mgmt) {
++		printf("SAILFISH WLAN: mgmt tx via HTT fc %02x%02x len %u\n", fr[0], fr[1], len);
++	}
+ 	/* A free slot: wait for completions while 31 frames are out (a lost completion times out). */
+ 	for (uint64_t end = wl_ms() + 50; (uint16_t)(wl_tx_id - wl_txc_n) >= WL_TXSLOTS - 1;) {
+ 		if (wl_ms() >= end) {
