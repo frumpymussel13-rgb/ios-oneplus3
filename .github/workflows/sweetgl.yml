@@ -58,8 +58,32 @@ jobs:
               if [ "$got" = "$want1" ]; then tag=$t; break; fi
             done
           fi
-          [ -n "$tag" ] || { echo "no Mesa tag matches the patch blobs"; exit 1; }
-          echo "using $tag"; echo "MESA_TAG=$tag" >> "$GITHUB_ENV"
+          if [ -z "$tag" ]; then
+            echo "no release tag matches; searching history for the patch's blobs"
+            git fetch -q origin main
+            F1=src/freedreno/drm/freedreno_bo.c; F2=src/freedreno/meson.build; F3=src/gallium/drivers/freedreno/freedreno_resource.c
+            w2=$(grep -E '^index ' ../../tools/sweetgl/mesa.patch | sed -n 2p | sed 's/index \([0-9a-f]*\)\..*/\1/')
+            w3=$(grep -E '^index ' ../../tools/sweetgl/mesa.patch | sed -n 3p | sed 's/index \([0-9a-f]*\)\..*/\1/')
+            echo "wanted blobs: $want1 $w2 $w3"
+            c1=""
+            for c in $(git rev-list origin/main -- $F1); do
+              if [ "$(git rev-parse --short=7 $c:$F1)" = "$want1" ]; then c1=$c; break; fi
+            done
+            [ -n "$c1" ] || { echo "no commit has the wanted freedreno_bo.c blob"; exit 1; }
+            echo "first commit (newest) with F1 blob: $c1"
+            # all three files must match; walk newest-first through changes of any of them
+            tag=""
+            for c in $(git rev-list origin/main -- $F1 $F2 $F3); do
+              a=$(git rev-parse --short=7 $c:$F1); b=$(git rev-parse --short=7 $c:$F2); d=$(git rev-parse --short=7 $c:$F3)
+              if [ "$a" = "$want1" ] && [ "$b" = "$w2" ] && [ "$d" = "$w3" ]; then tag=$c; break; fi
+            done
+            [ -n "$tag" ] || { echo "no commit has all three blobs"; exit 1; }
+            # newest commit before the next change of any of the three files
+            nxt=$(git rev-list --reverse $tag..origin/main -- $F1 $F2 $F3 | head -1)
+            if [ -n "$nxt" ]; then tag=$(git rev-parse "$nxt^"); fi
+            echo "mesa commit chosen: $tag $(git log -1 --format='%ad %s' $tag)"
+          fi
+          [ -n "$tag" ] || { echo "no Mesa revision matches the patch blobs"; exit 1; }
           git checkout -q "$tag"
           git apply --check ../../tools/sweetgl/mesa.patch
           git apply ../../tools/sweetgl/mesa.patch
