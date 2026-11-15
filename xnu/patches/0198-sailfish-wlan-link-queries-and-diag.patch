@@ -1,0 +1,124 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -2915,10 +2915,19 @@
+ static uint32_t wl_ifq_head, wl_ifq_count;
+ 
+ void sailfish_wlan_output(mbuf_t m);
++uint32_t sailfish_wlan_log_gen;                 /* bumped on link changes: the Apple80211/ioctl logs start over (SailfishWLAN.cpp reads it) */
++static uint32_t wl_out_logged;
+ 
+ void
+ sailfish_wlan_output(mbuf_t m)
+ {
++	if (wl_out_logged < 12) {                       /* first frames iOS sends: ethertype at offset 12 */
++		uint8_t eh[14] = { 0 };
++		wl_out_logged++;
++		mbuf_copydata(m, 0, mbuf_pkthdr_len(m) < 14 ? mbuf_pkthdr_len(m) : 14, eh);
++		printf("SAILFISH WLAN: output len %u type %02x%02x to %02x:%02x:%02x:%02x:%02x:%02x%s\n", (unsigned)mbuf_pkthdr_len(m), eh[12], eh[13],
++		    eh[0], eh[1], eh[2], eh[3], eh[4], eh[5], wl_net_up ? "" : " (link down: dropped)");
++	}
+ 	lck_mtx_lock(wl_ifq_lock);
+ 	if (wl_ifq_count == WL_IFQ || !wl_net_up) {
+ 		lck_mtx_unlock(wl_ifq_lock);
+@@ -2970,6 +2979,12 @@
+ #define A80211_DRIVER_VERSION   43
+ #define A80211_SCAN_REQ_MULTI   86
+ #define A80211_CURRENT_NETWORK  103
++#define A80211_CURRENT_NETWORK16 390                   /* iOS 16's number for CURRENT_NETWORK (same 1164-byte record) */
++#define A80211_PROTMODE         6
++#define A80211_RATE             8
++#define A80211_INT_MIT          18
++#define A80211_COUNTRY_CODE     51
++#define A80211_MCS              57
+ #define A80211_HW_CHANNELS      254
+ #define A80211_ASR_LEN          0x48c
+ #define WL_NOISE_DBM            (-95)
+@@ -3017,6 +3032,7 @@
+ sailfish_wlan_a80211(int set, uint32_t type, int32_t *val, user_addr_t data, uint32_t *len)
+ {
+ 	static uint8_t seen[2][512];
++	static uint32_t seen_gen;
+ 	static uint8_t r[A80211_ASR_LEN];
+ 	static uint32_t w[2 + 3 * 128];
+ 	uint8_t *b = (uint8_t *)w;
+@@ -3024,6 +3040,13 @@
+ 	int err = EOPNOTSUPP;
+ 	bool up = wl_net_up;
+ 	bzero(w, sizeof(w));
++	if (seen_gen != sailfish_wlan_log_gen) {        /* link changed: log every request type again */
++		seen_gen = sailfish_wlan_log_gen;
++		bzero(seen, sizeof(seen));
++	}
++	if (!set && type == A80211_CURRENT_NETWORK16) {
++		type = A80211_CURRENT_NETWORK;
++	}
+ 	w[0] = 1;                                       /* version */
+ 	if (set) {
+ 		switch (type) {
+@@ -3084,6 +3107,9 @@
+ 			printf("SAILFISH 80211: power %s\n", w[2] ? "on" : "off");
+ 			err = 0;
+ 			break;
++		case A80211_COUNTRY_CODE:               /* the firmware keeps its own regulatory domain */
++			err = 0;
++			break;
+ 		}
+ 	} else {
+ 		switch (type) {
+@@ -3132,9 +3158,25 @@
+ 			err = 0;
+ 			break;
+ 		case A80211_POWERSAVE:                  /* value: off */
++		case A80211_INT_MIT:                    /* value: interference mitigation off */
+ 			*val = 0;
+ 			err = 0;
+ 			break;
++		case A80211_RATE:                       /* value: tx rate in Mbit/s (11g/n 1x1 guess: 72) */
++			*val = up ? 72 : 0;
++			err = up ? 0 : ENXIO;
++			break;
++		case A80211_MCS:                        /* value: MCS index (1 stream, 72 Mbit/s = MCS 7 SGI) */
++			*val = up ? 7 : 0;
++			err = up ? 0 : ENXIO;
++			break;
++		case A80211_PROTMODE:                   /* {version, protmode (off), threshold} */
++			n = 12;
++			break;
++		case A80211_COUNTRY_CODE:               /* 3 raw bytes */
++			memcpy(b, "US", 3);
++			n = 3;
++			break;
+ 		case A80211_PHY_MODE:                   /* {version, supported (11a/b/g), active} */
+ 			w[1] = 0x2u | 0x4u | 0x8u;
+ 			w[2] = up ? (wl_bss.ch <= 14 ? 0x8u : 0x2u) : 0;
+@@ -3305,6 +3347,8 @@
+ 	uint16_t snr = up ? (uint16_t)wl_bss.snr : 0, noise = (uint16_t)WL_NOISE_DBM;
+ 	uint32_t reason = involuntary ? 4 : 0;
+ 	wl_net_up = up;
++	sailfish_wlan_log_gen++;
++	wl_out_logged = 0;
+ 	sailfish_wlan_iokit_link(up);
+ 	ev[0] = !up;
+ 	memcpy(ev + 4, &rssi, 4);
+--- a/iokit/Kernel/arm/SailfishWLAN.cpp
++++ b/iokit/Kernel/arm/SailfishWLAN.cpp
+@@ -37,6 +37,7 @@
+ /* bsd/dev/sailfish_wlan.c */
+ extern "C" void sailfish_wlan_output(mbuf_t m);
+ extern "C" int sailfish_wlan_a80211(int set, uint32_t type, int32_t *val, user_addr_t data, uint32_t *len);
++extern "C" uint32_t sailfish_wlan_log_gen;
+ 
+ #define WLAN_SPEED      54000000ULL     /* legacy 11g rates for now */
+ #define SIOCSA80211     0x802869c8UL    /* _IOW('i', 200, struct apple80211req) */
+@@ -77,6 +78,11 @@
+ IO80211Interface::performCommand(IONetworkController *ctr, unsigned long cmd, void *arg0, void *arg1)
+ {
+ 	static int logged;
++	static uint32_t gen;
++	if (gen != sailfish_wlan_log_gen) {             /* link changed: log the next 40 ioctls too */
++		gen = sailfish_wlan_log_gen;
++		logged = 0;
++	}
+ 	if ((cmd == SIOCGA80211 || cmd == SIOCSA80211) && arg1) {
+ 		struct apple80211req *r = (struct apple80211req *)arg1;
+ 		return sailfish_wlan_a80211(cmd == SIOCSA80211, (uint32_t)r->req_type, &r->req_val, (user_addr_t)r->req_data,

@@ -75,7 +75,15 @@ jobs:
         env:
           # keep going after errors so one run reports every compile failure
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
-        run: bash build.sh
+        run: |
+          set -o pipefail
+          bash build.sh 2>&1 | tee build.log
+          # build.sh only warns when a patch does not apply: fail instead of shipping a stale kernel
+          # (0197 was silently skipped this way). 0200 is a known-skipped older patch.
+          if grep -E 'Skipping patch .*/0[0-9]{3}-' build.log | grep -v '/0200-'; then
+            echo "error: some xnu/patches were not applied" >&2
+            exit 1
+          fi
 
       - name: Package build tree for local compiles
         if: always()
