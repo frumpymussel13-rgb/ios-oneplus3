@@ -50,6 +50,10 @@ PIXEL1 = dict(
 # OnePlus 3T (oneplus3, MSM8996pro): same SoC blocks as the Pixel 1 (GIC, UFS, MPIDRs
 # verified from the 3T's live FDT), different DRAM, framebuffer and clocks.
 # Apply with --oneplus3 (implies --pixel1 and overrides PIXEL1 fields).
+# SWEET_RES=WxHxS: iOS render size and scale on the Pixel 1 / 3T path (default 750x1334 @2x); the kernel needs sweetresw/sweetresh to match
+import os as _os
+RES = tuple(int(v) for v in _os.environ.get('SWEET_RES', '750x1334x2').split('x'))
+
 ONEPLUS3 = dict(
     phys_base=0x100000000, mem_size=0xbd8c0000,  # whole >4 GiB bank, no carve-outs in /proc/iomem
     fb=0x83400000, fb_size=0x2400000, fb_w=1080, fb_h=1920, fb_bpp=24,
@@ -126,7 +130,7 @@ def build(seed=None, qemu=False, highmem=False, pixel1=False):
         # from /chosen, the pixel size from IOMobileFramebuffer. Scale 0 makes
         # SpringBoard's FBSDisplayMode "infxinf@0x" invalid. 1080x2400 @3x =
         # 360x800 points (like iPhone X class devices); iPhone 8: 750x1334 @2x.
-        ('display-scale', u32(2 if pixel1 else 3)),
+        ('display-scale', u32(RES[2] if pixel1 else 3)),
         # XNU derives IOPlatformUUID (gethostuuid) from these on arm; without
         # them CFPreferences cannot use kCFPreferencesCurrentHost (no ByHost
         # files), so e.g. DataMigration never records LastSystemVersion and
@@ -235,8 +239,8 @@ def build(seed=None, qemu=False, highmem=False, pixel1=False):
             ph(),
             ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
-            ('canvas-width', u32(750 if pixel1 else 1125)),
-            ('canvas-height', u32(1334 if pixel1 else 2436)),
+            ('canvas-width', u32(RES[0] if pixel1 else 1125)),
+            ('canvas-height', u32(RES[1] if pixel1 else 2436)),
         ])] + ([
         # Wi-Fi (bsd/dev/sailfish_wlan.c, QCA6174 on PCIe): launchd starts
         # wifid only if the tree has a node named wlan; SailfishWLAN (the
