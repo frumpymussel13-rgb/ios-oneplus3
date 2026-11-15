@@ -1,0 +1,209 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -1451,6 +1451,9 @@
+ static uint8_t wl_wmi_ep = 0xff, wl_htt_ep = 0xff, wl_seq[8], wl_mac[6];
+ static uint32_t wl_htt_alloc, wl_htt_rd, wl_htt_rx;    /* HTT rx ring: host write and read index, MSDUs indicated */
+ static uint32_t wl_htt_types;                   /* HTT T2H message types seen (logged once each) */
++static uint32_t wl_slot_busy;                   /* tx slots (msdu ids) the firmware still holds: freed by their completion only */
++static uint64_t wl_txc_ms;                      /* time of the last tx completion */
++static uint64_t wl_ms(void);
+ static int32_t wl_txc_id = -1;                  /* last HTT tx completion: msdu id, status */
+ static uint16_t wl_txc_n;                       /* tx completions so far (data and management) */
+ static uint32_t wl_txc_status;
+@@ -1641,8 +1644,12 @@
+ 				}
+ 				*(volatile uint32_t *)(wl_dma + D_HTT_IDX) = wl_htt_alloc;
+ 			}
+-			if (eid == wl_htt_ep && len - tl >= 1 && f[8] == 14) {     /* MGMT_TX_COMPLETION */
++			if (eid == wl_htt_ep && len - tl >= 1 && f[8] == 14) {     /* MGMT_TX_COMPLETION {type, pad[3], desc id, status} */
+ 				wl_txc_n++;
++				if (len - tl >= 8) {
++					wl_slot_busy &= ~(1u << ((f[12] | f[13] << 8) % 32u));
++				}
++				wl_txc_ms = wl_ms();
+ 			}
+ 			if (eid == wl_htt_ep && len - tl >= 8 && f[8] == 18) {
+ 				/*
+@@ -1682,6 +1689,10 @@
+ 				if (nm && 12 + 2 * nm <= 8 + len) {
+ 					wl_txc_id = f[10 + 2 * nm] | f[11 + 2 * nm] << 8;     /* the last one */
+ 				}
++				for (uint32_t i = 0; i < nm && 14 + 2 * i <= 8 + len; i++) {
++					wl_slot_busy &= ~(1u << ((f[12 + 2 * i] | f[13 + 2 * i] << 8) % 32u));
++				}
++				wl_txc_ms = wl_ms();
+ 			}
+ 			wl_msg_len = len - tl;
+ 			wl_msg_eid = eid;
+@@ -2520,6 +2531,8 @@
+  * TX_COMPL_IND with the msdu id (wl_txc_id).
+  */
+ static uint16_t wl_tx_id;
++static uint32_t wl_tx_slot;                     /* slot of the last frame sent */
++static uint32_t wl_tx_full;                     /* frames dropped: all slots held by the firmware */
+ static bool wl_tx_noenc;                        /* HTT descriptor no_encrypt (bit 10): EAPOL goes out in clear even with the PTK installed */
+ 
+ /*
+@@ -2569,17 +2582,49 @@
+ 	if (mgmt) {
+ 		printf("SAILFISH WLAN: mgmt tx via HTT fc %02x%02x len %u\n", fr[0], fr[1], len);
+ 	}
+-	/* A free slot: wait for completions while 31 frames are out (a lost completion times out). */
+-	for (uint64_t end = wl_ms() + 50; (uint16_t)(wl_tx_id - wl_txc_n) >= WL_TXSLOTS - 1;) {
+-		if (wl_ms() >= end) {
+-			wl_txc_n = wl_tx_id;
++	/*
++	 * A slot (msdu id) the firmware does not hold: at most 31 out, each
++	 * freed by its own completion. Reusing a held id (the old 50 ms
++	 * timeout did) crashed the firmware under load (logs/join6.txt: fw_ind
++	 * 0x3 after ~380 frames). Full for 200 ms: drop this frame; no
++	 * completion at all for 2 s: the ids are lost, take them back.
++	 */
++	uint32_t slot = WL_TXSLOTS;
++	for (uint64_t end = wl_ms() + 200;;) {
++		if (__builtin_popcount(wl_slot_busy) < (int)WL_TXSLOTS - 1) {
++			for (uint32_t k = 1; k <= WL_TXSLOTS; k++) {
++				uint32_t s2 = (wl_tx_slot + k) % WL_TXSLOTS;
++				if (!(wl_slot_busy & (1u << s2))) {
++					slot = s2;
++					break;
++				}
++			}
++		}
++		if (slot < WL_TXSLOTS || wl_ms() >= end) {
+ 			break;
+ 		}
+ 		(void)wl_htc_poll(1);
+ 	}
++	if (slot == WL_TXSLOTS) {
++		if (wl_ms() - wl_txc_ms < 2000) {
++			if (wl_tx_full++ < 8) {
++				printf("SAILFISH WLAN: tx: all slots held by the firmware, frame dropped\n");
++			}
++			return false;
++		}
++		printf("SAILFISH WLAN: tx: no completion for 2 s, %d slots taken back\n", __builtin_popcount(wl_slot_busy));
++		wl_slot_busy = 0;
++		slot = (wl_tx_slot + 1) % WL_TXSLOTS;
++	}
++	wl_tx_slot = slot;
++	wl_slot_busy |= 1u << slot;
++	if (!wl_txc_ms) {
++		wl_txc_ms = wl_ms();
++	}
+ 	/* qcacld htt_tx_desc_init: postponed (bit 27, "re-send of a dropped frame") and pkt_subtype stay 0; ath10k's values are quirk 256 */
+-	uint16_t flags1 = (uint16_t)((mgmt ? 17u : 16u) << 6 | ((wl_quirk & 256) ? 1u << 11 : 0)), id = ++wl_tx_id;
+-	uint32_t slot = id % WL_TXSLOTS, fo = D_TXF + 2048 * slot, lo = D_TXFRAG + 16 * slot;
++	uint16_t flags1 = (uint16_t)((mgmt ? 17u : 16u) << 6 | ((wl_quirk & 256) ? 1u << 11 : 0));
++	++wl_tx_id;
++	uint32_t fo = D_TXF + 2048 * slot, lo = D_TXFRAG + 16 * slot;
+ 	uint8_t *f = (uint8_t *)(wl_dma + fo), *p = wl_htc_tx_payload(&ce4);
+ 	volatile uint32_t *frag = (volatile uint32_t *)(wl_dma + lo);
+ 	uint32_t pre = ((len < 50 ? len : 50) + 3) & ~3u, pa = WL_DMA_PA + (mgmt ? fo : lo);
+@@ -2602,13 +2647,17 @@
+ 	p[14] = p[15] = 0;
+ 	memcpy(p + 16, f, pre);
+ 	wl_txc_id = -1;
+-	return wl_htc_send(&ce4, wl_htt_ep, 16 + pre);
++	if (!wl_htc_send(&ce4, wl_htt_ep, 16 + pre)) {
++		wl_slot_busy &= ~(1u << slot);
++		return false;
++	}
++	return true;
+ }
+ 
+ static bool
+ wl_tx_wait(uint32_t ms)
+ {
+-	int32_t slot = (int32_t)(wl_tx_id % WL_TXSLOTS);
++	int32_t slot = (int32_t)wl_tx_slot;
+ 	for (uint64_t end = wl_ms() + ms; wl_ms() < end && wl_txc_id != slot;) {
+ 		(void)wl_htc_poll(10);
+ 	}
+@@ -3460,6 +3509,69 @@
+  * frames go in through wl_rx_msdu; between them the thread sleeps until
+  * the chip interrupts (wl_idle), or polls every 1 ms without interrupts.
+  */
++/*
++ * Firmware crash while running (FW_IND bit 0, as ath10k_pci_fw_crashed_dump):
++ * register dump from hi_failure_state, link down for iOS, then stages 2 and 3
++ * again (cold reset, firmware download, HTC/WMI) and a scan, so wifid sees
++ * networks again. At most 3 times per boot.
++ */
++static uint32_t wl_recoveries;
++
++static bool
++wl_fw_recover(void)
++{
++	uint32_t fs = 0;
++	printf("SAILFISH WLAN: FIRMWARE CRASHED while running (fw_ind %#x, rtc %#x, %d tx slots held, tx id %u), recovery %u\n",
++	    rd(wl_bar, Q_FW_IND), rd(wl_bar, Q_RTC_STATE), __builtin_popcount(wl_slot_busy), wl_tx_id, wl_recoveries + 1);
++	if (wl_diag_read32(HI(0x04), &fs) && fs) {
++		uint32_t w[60] = { 0 };
++		for (int i = 0; i < 60 && wl_diag_read32(fs + 4 * i, &w[i]); i++) {
++		}
++		printf("SAILFISH WLAN: crash dump at %#x:\n", fs);
++		for (int i = 0; i < 60; i += 6) {
++			printf("SAILFISH WLAN: crash[%02d] %08x %08x %08x %08x %08x %08x\n", i, w[i], w[i + 1], w[i + 2], w[i + 3], w[i + 4], w[i + 5]);
++		}
++	} else {
++		printf("SAILFISH WLAN: no crash dump (hi_failure_state unreadable)\n");
++	}
++	sweet_log_kick();
++	wl_ready = false;
++	if (wl_net_up) {
++		wl_link_changed(false, true);
++	}
++	lck_mtx_lock(wl_ifq_lock);                      /* frames for the old association */
++	while (wl_ifq_count) {
++		mbuf_freem(wl_ifq[wl_ifq_head]);
++		wl_ifq_head = (wl_ifq_head + 1) % WL_IFQ;
++		wl_ifq_count--;
++	}
++	lck_mtx_unlock(wl_ifq_lock);
++	if (++wl_recoveries > 3) {
++		printf("SAILFISH WLAN: too many firmware crashes, Wi-Fi stays off until reboot\n");
++		return false;
++	}
++	wl_slot_busy = 0;
++	wl_txc_n = wl_tx_id;
++	if (wl_irq_on) {
++		sweet_spi_mask(WL_IRQ_INTID, true);     /* no handler on the BAR during the cold reset */
++	}
++	bool ok = wl_stage2();
++	ok = ok && wl_stage3();
++	ok = ok && wl_scan();
++	wl_aspm_off("recovered");
++	wl_fast = true;
++	if (ok && wl_irq_on) {
++		wr(wl_bar, ce1.reg + CE_HOST_IE, 1u);
++		wr(wl_bar, ce2.reg + CE_HOST_IE, 1u);
++		sweet_spi_mask(WL_IRQ_INTID, false);
++	}
++	wl_ready = ok;
++	printf("SAILFISH WLAN: firmware recovery %s\n", ok ? "done, scanning again" : "FAILED");
++	sailfish_wlan_iokit_event(A80211_EV_POWER_CHANGED, NULL, 0);
++	sweet_log_kick();
++	return ok;
++}
++
+ static void
+ wl_run(void)
+ {
+@@ -3488,10 +3600,15 @@
+ 				wl_msleep(1000);
+ 			}
+ 		}
++		if ((rd(wl_bar, Q_FW_IND) & 1u) && !wl_fw_recover()) {
++			for (;;) {
++				wl_msleep(1000);
++			}
++		}
+ 		if (wl_ms() >= next) {                  /* status every 10 s */
+ 			next += 10000;
+ 			printf("SAILFISH WLAN: run: tx %u (drop %u) rx %u, irqs %u, tx out %u, ifq %u, fw_ind %#x, ltssm %#x lnk %#x, %d.%d C (sensor %d.%d)\n", tx, txdrop,
+-			    wl_htt_rx - rx0, wl_irqs, (uint16_t)(wl_tx_id - wl_txc_n), wl_ifq_count, rd(wl_bar, Q_FW_IND),
++			    wl_htt_rx - rx0, wl_irqs, (uint32_t)__builtin_popcount(wl_slot_busy), wl_ifq_count, rd(wl_bar, Q_FW_IND),
+ 			    rd(wl_dbi, 0x728) & 0x3fu, rd(wl_dbi, DBI_LINK_STATUS) >> 16, wl_temp() / 10, (wl_temp() % 10 + 10) % 10,
+ 			    wl_temp_max_id / 16, wl_temp_max_id % 16);
+ 		}
