@@ -25,7 +25,7 @@ jobs:
 
       - name: Tools
         run: |
-          brew install ninja meson pkg-config
+          brew install ninja meson pkg-config bison flex
           python3 --version
           XC="${{ inputs.xcode }}"
           [ -n "$XC" ] || XC=$(ls -d /Applications/Xcode_1*.app | sort -V | head -1)
@@ -41,6 +41,10 @@ jobs:
           python3 -m venv research/tools/venv
           research/tools/venv/bin/pip install --quiet mako pyyaml packaging setuptools meson ply
           ln -sf "$(command -v ninja)" research/tools/bin/ninja
+          # macOS /usr/bin/bison is 2.3: too old for Mesa's .y files
+          ln -sf "$(brew --prefix bison)/bin/bison" research/tools/bin/bison
+          ln -sf "$(brew --prefix flex)/bin/flex" research/tools/bin/flex
+          research/tools/bin/bison --version | head -1
           mkdir -p research/xcode15
           ln -sfn "$XC" research/xcode15/Xcode.app
 
