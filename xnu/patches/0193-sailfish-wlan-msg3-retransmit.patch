@@ -1,0 +1,26 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -2833,6 +2833,23 @@
+ 	if (e[1] != 3 || elen > n || elen < EK_DATA || EK_DATA + dlen > elen) {
+ 		return true;
+ 	}
++	if ((info & 0x8u) && (info & 0x40u) && memcmp(e + EK_REPLAY, wl_replay, 8) == 0) {
++		/* The AP repeats msg 3 (replay counter unchanged) because it has not seen our msg 4: answer again, stay connected. */
++		uint32_t rl = EK_DATA;
++		bzero(r, rl);
++		r[0] = 1;
++		r[1] = 3;
++		r[3] = EK_DATA - 4;
++		r[4] = 2;
++		r[EK_INFO] = 0x03;
++		r[EK_INFO + 1] = 0x0a;
++		memcpy(r + EK_REPLAY, e + EK_REPLAY, 8);
++		wl_hmac_sha1(wl_ptk, 16, r, rl, NULL, 0, mic);
++		memcpy(r + EK_MIC, mic, 16);
++		bool sent = wl_data_tx(wl_bss.bssid, 0x888e, r, rl) && wl_tx_wait(1000);
++		printf("SAILFISH WLAN: EAPOL 3/4 repeated (info %#x) -> 4/4 again %s (tx status %u)\n", info, sent ? "sent" : "SEND FAILED", wl_txc_status);
++		return true;
++	}
+ 	if (info & 0x8u) {
+ 		printf("SAILFISH WLAN: EAPOL pairwise key info %#x while connected (PTK rekey)\n", info);
+ 		return false;
