@@ -1,0 +1,27 @@
+name: sweettune
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "sweettune/**"
+      - ".github/workflows/sweettune.yml"
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build SweetTune.app (iOS arm64, ad-hoc signed)
+        run: |
+          set -e
+          cd sweettune
+          mkdir -p out/SweetTune.app
+          xcrun -sdk iphoneos clang -arch arm64 -miphoneos-version-min=16.0 -fobjc-arc -O2 \
+            -framework UIKit -framework Foundation SweetTune.m -o out/SweetTune.app/SweetTune
+          cp Info.plist out/SweetTune.app/Info.plist
+          codesign -f -s - out/SweetTune.app
+          file out/SweetTune.app/SweetTune
+          (cd out && tar -czf SweetTune.app.tgz SweetTune.app)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SweetTune
+          path: sweettune/out/SweetTune.app.tgz

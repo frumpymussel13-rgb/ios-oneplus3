@@ -1,0 +1,129 @@
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -79,6 +79,7 @@
+ #include <sys/errno.h>
+ #include <kern/clock.h>
+ #include <kern/thread.h>
++#include <sys/sysctl.h>
+ #include <kern/sched_prim.h>
+ #include <kern/locks.h>
+ #include <pexpert/pexpert.h>
+@@ -1757,6 +1758,7 @@
+  * down before the voltage does and up after it (gfx_raise), under the VM lock like gfx_raise.
+  */
+ static int g_cur_mhz = 300;
++static volatile int g_top_mhz = 600, g_hw_mhz = 600, g_tlimit = 72, g_temp10;
+ 
+ static bool
+ gfx_volt(uint32_t mv)
+@@ -1823,17 +1825,23 @@
+ {
+ 	(void)result;
+ 	static const int levels[4] = { 600, 400, 300, 200 };
+-	int top = (int)(uintptr_t)arg, limit = 72, idx = top >= 600 ? 0 : 1, min_idx = idx, ticks = 0;
+-	(void)PE_parse_boot_argn("sweettlimit", &limit, sizeof(limit));
+-	int thr[3] = { limit * 10, (limit + 7) * 10, (limit + 13) * 10 };
+-	printf("SWEET THERMAL: governor on, GPU %d MHz down from %d C (%d C: 300, %d C: 200)\n", top, limit, limit + 7, limit + 13);
++	int top = (int)(uintptr_t)arg, idx = top >= 600 ? 0 : 1, ticks = 0;
++	g_top_mhz = g_hw_mhz = top;
++	(void)PE_parse_boot_argn("sweettlimit", &g_tlimit, sizeof(g_tlimit));
++	printf("SWEET THERMAL: governor on, GPU %d MHz down from %d C (%d C: 300, %d C: 200)\n", top, g_tlimit, g_tlimit + 7, g_tlimit + 13);
+ 	for (;;) {
+ 		gpu_sleep(1);
+ 		int t = gfx_temp(), want = idx;
+ 		if (t < -500) {
+ 			continue;
+ 		}
+-		if (idx < 3 && t >= thr[idx]) {
++		g_temp10 = t;
++		/* limits and the top clock can be changed live (sysctl kern.sweet_gpu_max / kern.sweet_tlimit) */
++		int min_idx = g_top_mhz >= 600 ? 0 : g_top_mhz >= 400 ? 1 : g_top_mhz >= 300 ? 2 : 3;
++		int thr[3] = { g_tlimit * 10, (g_tlimit + 7) * 10, (g_tlimit + 13) * 10 };
++		if (idx < min_idx) {
++			want = min_idx;
++		} else if (idx < 3 && t >= thr[idx]) {
+ 			want = idx + 1;
+ 		} else if (idx > min_idx && t < thr[idx - 1] - 50 && ticks % 5 == 0) {
+ 			want = idx - 1;
+@@ -1853,6 +1861,81 @@
+ 	}
+ }
+ 
++/* kern.sweet_gpu_max (RW: 200/300/400/600, not above the boot clock), kern.sweet_gpu_cur and kern.sweet_temp (0.1 C) (RO),
++ * kern.sweet_tlimit (RW: first throttle limit in C, 50-95), kern.sweet_reboot (WO: "fastboot", "recovery", "system"). */
++static int
++sweet_sysctl_gpu_max SYSCTL_HANDLER_ARGS
++{
++	(void)arg1;
++	(void)arg2;
++	int v = g_top_mhz, err = sysctl_handle_int(oidp, &v, 0, req);
++	if (err == 0 && req->newptr) {
++		if ((v != 200 && v != 300 && v != 400 && v != 600) || v > g_hw_mhz) {
++			return EINVAL;
++		}
++		g_top_mhz = v;
++	}
++	return err;
++}
++
++static int
++sweet_sysctl_tlimit SYSCTL_HANDLER_ARGS
++{
++	(void)arg1;
++	(void)arg2;
++	int v = g_tlimit, err = sysctl_handle_int(oidp, &v, 0, req);
++	if (err == 0 && req->newptr) {
++		if (v < 50 || v > 95) {
++			return EINVAL;
++		}
++		g_tlimit = v;
++	}
++	return err;
++}
++
++/* Restart reason in IMEM (0x066bf65c: bootloader 0x77665500, normal 0x77665501, recovery 0x77665502) then PS_HOLD, as Linux msm-poweroff. */
++static int
++sweet_sysctl_reboot SYSCTL_HANDLER_ARGS
++{
++	(void)arg1;
++	(void)arg2;
++	char buf[16] = "";
++	int err = sysctl_handle_string(oidp, buf, sizeof(buf), req);
++	if (err != 0 || !req->newptr) {
++		return err;
++	}
++	uint32_t reason;
++	if (strcmp(buf, "fastboot") == 0) {
++		reason = 0x77665500;
++	} else if (strcmp(buf, "recovery") == 0) {
++		reason = 0x77665502;
++	} else if (strcmp(buf, "system") == 0) {
++		reason = 0x77665501;
++	} else {
++		return EINVAL;
++	}
++	vm_offset_t imem = ml_io_map(0x066bf000, 0x1000);
++	vm_offset_t pshold = ml_io_map(0x004ab000, 0x1000);
++	if (imem == 0 || pshold == 0) {
++		return EIO;
++	}
++	printf("SWEET REBOOT: %s\n", buf);
++	delay(300000);                  /* let the persistent log flush */
++	*(volatile uint32_t *)(imem + 0x65c) = reason;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	*(volatile uint32_t *)pshold = 0;
++	__asm__ volatile ("dsb sy" ::: "memory");
++	delay(1000000);
++	return EIO;
++}
++
++SYSCTL_PROC(_kern, OID_AUTO, sweet_gpu_max, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, sweet_sysctl_gpu_max, "I", "");
++SYSCTL_PROC(_kern, OID_AUTO, sweet_tlimit, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, sweet_sysctl_tlimit, "I", "");
++SYSCTL_INT(_kern, OID_AUTO, sweet_gpu_cur, CTLFLAG_RD | CTLFLAG_LOCKED, &g_cur_mhz, 0, "");
++SYSCTL_INT(_kern, OID_AUTO, sweet_temp, CTLFLAG_RD | CTLFLAG_LOCKED, (int *)&g_temp10, 0, "");
++SYSCTL_PROC(_kern, OID_AUTO, sweet_reboot, CTLTYPE_STRING | CTLFLAG_WR | CTLFLAG_ANYBODY | CTLFLAG_LOCKED, 0, 0, sweet_sysctl_reboot, "A", "");
++
++
+ 
+ 
+ /* Full-screen (750x1334, pitch 3072) source-over quads: average us of 5. */
