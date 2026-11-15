@@ -1,0 +1,79 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -2520,6 +2520,7 @@
+  * TX_COMPL_IND with the msdu id (wl_txc_id).
+  */
+ static uint16_t wl_tx_id;
++static bool wl_tx_noenc;                        /* HTT descriptor no_encrypt (bit 10): EAPOL goes out in clear even with the PTK installed */
+ 
+ /*
+  * Management frames by WMI_MGMT_TX_SEND (qcacld "transmit by reference"): the
+@@ -2587,7 +2588,7 @@
+ 	frag[1] = len;
+ 	frag[2] = frag[3] = 0;
+ 	p[0] = 1;                                       /* TX_FRM */
+-	p[1] = (uint8_t)(((wl_quirk & 256) ? 1u : 0) | (mgmt ? 3u : 1u) << 5);   /* type MGMT / NATIVE_WIFI */
++	p[1] = (uint8_t)(((wl_quirk & 256) ? 1u : 0) | (wl_tx_noenc ? 4u : 0) | (mgmt ? 3u : 1u) << 5);   /* type MGMT / NATIVE_WIFI */
+ 	p[2] = flags1 & 0xff;                           /* vdev 0, ext tid, POSTPONED */
+ 	p[3] = flags1 >> 8;
+ 	p[4] = len & 0xff;
+@@ -2639,7 +2640,10 @@
+ 	}
+ 	memcpy(f + n, snap, 8);
+ 	memcpy(f + n + 8, body, len);
+-	return wl_htt_tx(f, n + 8 + len, false);
++	wl_tx_noenc = type == 0x888e;
++	bool ok = wl_htt_tx(f, n + 8 + len, false);
++	wl_tx_noenc = false;
++	return ok;
+ }
+ 
+ static bool
+@@ -2798,9 +2802,10 @@
+ 			memcpy(r + EK_REPLAY, e + EK_REPLAY, 8);
+ 			wl_hmac_sha1(ptk, 16, r, rl, NULL, 0, mic);
+ 			memcpy(r + EK_MIC, mic, 16);
+-			bool sent = wl_data_tx(wl_bss.bssid, 0x888e, r, rl) && wl_tx_wait(1000);
+-			printf("SAILFISH WLAN: EAPOL 3/4 (info %#x, GTK %s id %u) -> 4/4 %s (tx status %u)\n", info, gtk_ok ? "ok" : "MISSING",
+-			    gtk_id, sent ? "sent" : "SEND FAILED", wl_txc_status);
++			bool queued = wl_data_tx(wl_bss.bssid, 0x888e, r, rl), sent = queued && wl_tx_wait(1000);
++			printf("SAILFISH WLAN: EAPOL 3/4 (info %#x, GTK %s id %u) -> 4/4 %s (queued %d, tx status %u, tx id %u completed %d, out %u)\n", info,
++			    gtk_ok ? "ok" : "MISSING", gtk_id, sent ? "sent" : "no completion", queued, wl_txc_status, wl_tx_id, wl_txc_id,
++			    (unsigned)(uint16_t)(wl_tx_id - wl_txc_n));
+ 			done = gtk_ok && wl_install_key(0, 0, ptk + 32, NULL) && wl_install_key(gtk_id, 1, gtk, rsc);
+ 			if (!done) {
+ 				break;
+@@ -2833,8 +2838,18 @@
+ 	if (e[1] != 3 || elen > n || elen < EK_DATA || EK_DATA + dlen > elen) {
+ 		return true;
+ 	}
+-	if ((info & 0x8u) && (info & 0x40u) && memcmp(e + EK_REPLAY, wl_replay, 8) == 0) {
+-		/* The AP repeats msg 3 (replay counter unchanged) because it has not seen our msg 4: answer again, stay connected. */
++	if ((info & 0x8u) && (info & 0x40u)) {
++		/*
++		 * Pairwise msg 3 (install bit) while connected: the AP repeats it, with a NEW replay counter, when it has not seen
++		 * our msg 4. Check the MIC with our KCK and answer msg 4 again; a real PTK rekey starts with msg 1 (no install bit).
++		 */
++		memcpy(got, e + EK_MIC, 16);
++		bzero(e + EK_MIC, 16);
++		wl_hmac_sha1(wl_ptk, 16, e, elen, NULL, 0, mic);
++		if (memcmp(mic, got, 16) != 0) {
++			printf("SAILFISH WLAN: repeated EAPOL 3/4 (info %#x) with a bad MIC: ignored\n", info);
++			return true;
++		}
+ 		uint32_t rl = EK_DATA;
+ 		bzero(r, rl);
+ 		r[0] = 1;
+@@ -2846,8 +2861,10 @@
+ 		memcpy(r + EK_REPLAY, e + EK_REPLAY, 8);
+ 		wl_hmac_sha1(wl_ptk, 16, r, rl, NULL, 0, mic);
+ 		memcpy(r + EK_MIC, mic, 16);
+-		bool sent = wl_data_tx(wl_bss.bssid, 0x888e, r, rl) && wl_tx_wait(1000);
+-		printf("SAILFISH WLAN: EAPOL 3/4 repeated (info %#x) -> 4/4 again %s (tx status %u)\n", info, sent ? "sent" : "SEND FAILED", wl_txc_status);
++		memcpy(wl_replay, e + EK_REPLAY, 8);
++		bool queued = wl_data_tx(wl_bss.bssid, 0x888e, r, rl), sent = queued && wl_tx_wait(300);
++		printf("SAILFISH WLAN: EAPOL 3/4 repeated (info %#x) -> 4/4 again %s (queued %d, tx id %u completed %d status %u, out %u)\n", info,
++		    sent ? "sent" : "no completion", queued, wl_tx_id, wl_txc_id, wl_txc_status, (unsigned)(uint16_t)(wl_tx_id - wl_txc_n));
+ 		return true;
+ 	}
+ 	if (info & 0x8u) {
