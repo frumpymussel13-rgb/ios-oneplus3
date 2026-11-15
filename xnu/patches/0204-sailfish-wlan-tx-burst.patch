@@ -27,7 +27,7 @@
  		lck_mtx_unlock(wl_ifq_lock);
  		mbuf_freem(m);
  		return;
-@@ -3643,11 +3647,13 @@
+@@ -3643,12 +3647,15 @@
  		}
  		if (wl_ms() >= next) {                  /* status every 10 s */
  			next += 10000;
@@ -37,12 +37,15 @@
  			    rd(wl_dbi, 0x728) & 0x3fu, rd(wl_dbi, DBI_LINK_STATUS) >> 16, wl_temp() / 10, (wl_temp() % 10 + 10) % 10,
  			    wl_temp_max_id / 16, wl_temp_max_id % 16);
  		}
+-		mbuf_t m = NULL;
 +		/* Up to 32 queued frames per pass (one per pass capped tx far below the link). */
++		mbuf_t m = NULL;                        /* after the loop: NULL when the queue ran empty (idle allowed) */
 +		for (int burst = 0; burst < 32; burst++) {
- 		mbuf_t m = NULL;
++		m = NULL;
  		lck_mtx_lock(wl_ifq_lock);
  		if (wl_ifq_count) {
-@@ -3656,7 +3662,10 @@
+ 			m = wl_ifq[wl_ifq_head];
+@@ -3656,7 +3663,10 @@
  			wl_ifq_count--;
  		}
  		lck_mtx_unlock(wl_ifq_lock);
@@ -54,7 +57,7 @@
  			size_t len = mbuf_pkthdr_len(m);
  			if (len > ETHER_HDR_LEN && len <= sizeof(fr) && mbuf_copydata(m, 0, len, fr) == 0) {
  				if (wl_data_tx(fr, (uint16_t)(fr[12] << 8 | fr[13]), fr + ETHER_HDR_LEN, (uint32_t)(len - ETHER_HDR_LEN))) {
-@@ -3669,6 +3678,7 @@
+@@ -3669,6 +3679,7 @@
  			}
  			mbuf_freem(m);
  		}
