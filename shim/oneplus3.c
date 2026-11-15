@@ -52,6 +52,41 @@ static void delay_ms(unsigned ms)
 
 extern char _end[];
 
+#ifdef PATTERN_TEST
+/* geometry test card: border at the panel edges, RGB thirds, diagonal, ticks every 100 px */
+static void pat_px(int x, int y, uint32_t c)
+{
+	if (x < 0 || y < 0 || x >= FB_W || y >= FB_H)
+		return;
+#if FB_BPP == 3
+	volatile uint8_t *p = (volatile uint8_t *)con_fb + y * FB_STRIDE + x * 3;
+	p[0] = c; p[1] = c >> 8; p[2] = c >> 16;
+#else
+	con_fb[y * (FB_STRIDE / 4) + x] = c;
+#endif
+}
+static void pattern(void)
+{
+	/* colors are 0x00RRGGBB; the byte order in memory is what is being tested */
+	for (int y = 0; y < FB_H; y++)
+		for (int x = 0; x < FB_W; x++) {
+			uint32_t c = 0x00202020;
+			if (y > 300 && y < 600) c = x < FB_W / 3 ? 0x00ff0000 : x < 2 * FB_W / 3 ? 0x0000ff00 : 0x000000ff;
+			pat_px(x, y, c);
+		}
+	for (int i = 0; i < 12; i++)
+		for (int x = 0; x < FB_W; x++) { pat_px(x, i, 0xffffffff); pat_px(x, FB_H - 1 - i, 0xffffffff); }
+	for (int i = 0; i < 12; i++)
+		for (int y = 0; y < FB_H; y++) { pat_px(i, y, 0xffffffff); pat_px(FB_W - 1 - i, y, 0xffffffff); }
+	for (int d = 0; d < FB_H && d < FB_W * 2; d++) { pat_px(d, d, 0x00ffff00); pat_px(d + 1, d, 0x00ffff00); }
+	for (int t = 100; t < FB_H; t += 100)
+		for (int x = 12; x < 60; x++) pat_px(x, t, 0x00ff00ff);
+	for (int t = 100; t < FB_W; t += 100)
+		for (int y = 12; y < 60; y++) pat_px(t, y, 0x0000ffff);
+	con_flush();
+}
+#endif
+
 void shim_main(uint64_t dtb)
 {
 	/* The bootloader leaves the APSS watchdog running (bite 30 s after entry). */
@@ -67,6 +102,10 @@ void shim_main(uint64_t dtb)
 	plog_hex("PAYLOAD", (uintptr_t)_end);
 
 	con_clear(0);
+#ifdef PATTERN_TEST
+	pattern();
+	delay_ms(90000);
+#endif
 	con_str("SHIM", "oneplus3 (3T) loader");
 	con_skip();
 	/*

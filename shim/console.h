@@ -3,7 +3,7 @@
 
 #ifdef ONEPLUS3
 /* OnePlus 3T: reserved cont_splash_mem@83401000 (live FDT), 1080x1920 */
-#define FB_BASE		0x83401000UL
+#define FB_BASE		0x83400000UL	/* panel scans from dfps_data_mem start, 4096 B below cont_splash_mem (Test 14) */
 #define FB_W		1080
 #define FB_H		1920
 #ifndef OP3_BPP

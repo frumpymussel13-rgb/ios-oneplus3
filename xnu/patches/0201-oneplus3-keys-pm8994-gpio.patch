@@ -1,0 +1,116 @@
+--- a/bsd/dev/sweet_keys.c	2026-11-14 19:49:06.510585638 -0600
++++ b/bsd/dev/sweet_keys.c	2026-11-14 19:49:06.518538998 -0600
+@@ -3,9 +3,11 @@
+  * the scheduler is running. Every 20 ms:
+  *   power        PM8994 (SID 0) PON RT_STS 0x810 bit 0 (KPDPWR), read through
+  *                the SPMI PMIC arbiter v2 observer channel
+- *   volume up    TLMM GPIO 126, active low
+- *   volume down  TLMM GPIO 121, active low -> reported as Home (the iPhone 8
+- *                userland needs a Home button; the Pixel has none)
++ *   volume up    OnePlus 3T: PM8994 (SID 0) GPIO3, active low (gpio_keys DT)
++ *   volume down  OnePlus 3T: PM8994 GPIO2, active low -> reported as Home
++ *                (the iPhone 8 userland needs a Home button)
++ *                Read through the PMIC arbiter observer channel (GPIO STATUS
++ *                0x08 bit 0). The Pixel's TLMM GPIO 126/121 are other pins here.
+  * Keys only read the PMIC (EXT_READL on an observer channel);
+  * sweet_pmic_write (the battery's charger setup) writes through the
+  * peripheral's own channel. The volume GPIOs only get their pull-up (as Linux's
+@@ -35,14 +37,17 @@
+ #define KEYS_APIDS       256u            /* core is 0xc00: map 0x800 + 4n */
+ #define KEYS_PON_RT      0x0810u
+ #define KEYS_NO_APID     0xffffu
+-/* pinctrl@1010000, one 4 KiB tile per GPIO: CFG +0, IN_OUT +4 */
+-#define KEYS_TLMM_PA     0x01010000u
+-#define KEYS_GPIO_VOLUP  126u
+-#define KEYS_GPIO_VOLDN  121u
++/* PM8994 GPIO n: peripheral 0xc0 + n - 1 on SID 0; LV/MV GPIO registers */
++#define KEYS_PPID_VOLUP  0x0c2u         /* GPIO3 */
++#define KEYS_PPID_VOLDN  0x0c1u         /* GPIO2 */
++#define KEYS_GPIO_STATUS 0x08u          /* bit 0: input level */
++#define KEYS_GPIO_MODE   0x40u          /* [6:4] 0 = digital input */
++#define KEYS_GPIO_PULL   0x42u          /* [2:0] 0 = pull-up 30 uA */
++#define KEYS_GPIO_EN     0x46u          /* bit 7 enable */
+ 
+ enum { KEY_POWER = 0, KEY_VOLUP = 1, KEY_HOME = 3 };
+ 
+-static vm_offset_t keys_core, keys_obs, keys_cnfg, keys_volup, keys_voldn;
++static vm_offset_t keys_core, keys_obs, keys_cnfg;
+ static uint16_t keys_pon_apid = KEYS_NO_APID;
+ static uint32_t keys_version, keys_last_status;
+ static bool keys_started;
+@@ -201,22 +206,30 @@
+ 	return ok;
+ }
+ 
+-static vm_offset_t
+-keys_gpio_map(uint32_t gpio)
++/* Log one PM8994 GPIO's state; enable it as a pulled-up input if the bootloader left it off. */
++static void
++keys_pmic_gpio_setup(const char *name, uint16_t ppid)
+ {
+-	vm_offset_t tile = ml_io_map(KEYS_TLMM_PA + 0x1000u * gpio, 0x1000);
+-	if (tile == 0) {
+-		return 0;
+-	}
+-	uint32_t cfg = keys_rd(tile, 0);
+-	printf("SWEET KEYS: gpio%u cfg=%#x in=%u\n", gpio, cfg, keys_rd(tile, 4) & 1u);
+-	if ((cfg & 3u) != 3u || (cfg & 0x200u) != 0) {
+-		/* function 0 (GPIO), input, 2 mA, pull-up */
+-		*(volatile uint32_t *)tile = 3u;
+-		__asm__ volatile("dsb sy" ::: "memory");
+-		printf("SWEET KEYS: gpio%u set to input pull-up (cfg %#x)\n", gpio, keys_rd(tile, 0));
++	uint8_t st = 0, mode = 0, pull = 0, en = 0;
++	bool ok = sweet_pmic_read(ppid, KEYS_GPIO_STATUS, &st) && sweet_pmic_read(ppid, KEYS_GPIO_MODE, &mode) &&
++	    sweet_pmic_read(ppid, KEYS_GPIO_PULL, &pull) && sweet_pmic_read(ppid, KEYS_GPIO_EN, &en);
++	printf("SWEET KEYS: %s ppid 0x%03x %s status=%#x mode=%#x pull=%#x en=%#x\n", name, ppid,
++	    ok ? "ok" : "READ FAILED", st, mode, pull, en);
++	if (ok && !(en & 0x80u)) {
++		bool w = sweet_pmic_write(ppid, KEYS_GPIO_MODE, 0x00) && sweet_pmic_write(ppid, KEYS_GPIO_PULL, 0x00) &&
++		    sweet_pmic_write(ppid, KEYS_GPIO_EN, 0x80);
++		uint8_t st2 = 0;
++		(void)sweet_pmic_read(ppid, KEYS_GPIO_STATUS, &st2);
++		printf("SWEET KEYS: %s was disabled: set input pull-up %s, status now %#x\n", name, w ? "ok" : "FAILED", st2);
+ 	}
+-	return tile;
++}
++
++/* 1 = pressed (active low). A failed read counts as released. */
++static int
++keys_pmic_pressed(uint16_t ppid)
++{
++	uint8_t st = 0xff;
++	return sweet_pmic_read(ppid, KEYS_GPIO_STATUS, &st) ? !(st & 1u) : 0;
+ }
+ 
+ static void
+@@ -241,8 +254,8 @@
+ 		bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
+ 		int now[3] = {
+ 			!!(pon & 1u),
+-			!(keys_rd(keys_volup, 4) & 1u),
+-			!(keys_rd(keys_voldn, 4) & 1u),
++			keys_pmic_pressed(KEYS_PPID_VOLUP),
++			keys_pmic_pressed(KEYS_PPID_VOLDN),
+ 		};
+ 		if (!pok && keys_pon_apid != KEYS_NO_APID && (errors++ % 250u) == 0) {
+ 			printf("SWEET KEYS: PON read error arb-status=%#x\n", keys_last_status);
+@@ -274,9 +287,7 @@
+ 	}
+ 	keys_core = ml_io_map(KEYS_CORE_PA, 0x1000);
+ 	keys_cnfg = ml_io_map(KEYS_CNFG_PA, 0x1000);
+-	keys_volup = keys_gpio_map(KEYS_GPIO_VOLUP);
+-	keys_voldn = keys_gpio_map(KEYS_GPIO_VOLDN);
+-	if (!keys_core || !keys_cnfg || !keys_volup || !keys_voldn) {
++	if (!keys_core || !keys_cnfg) {
+ 		printf("SWEET KEYS: MMIO mapping failed\n");
+ 		return;
+ 	}
+@@ -292,6 +303,8 @@
+ 			keys_pon_apid = KEYS_NO_APID;
+ 		}
+ 	}
++	keys_pmic_gpio_setup("volume up (PM8994 GPIO3)", KEYS_PPID_VOLUP);
++	keys_pmic_gpio_setup("volume down/Home (PM8994 GPIO2)", KEYS_PPID_VOLDN);
+ 	uint8_t pon = 0;
+ 	bool pok = keys_read(keys_pon_apid, KEYS_PON_RT, &pon);
+ 	printf("SWEET KEYS: arb=%#x pon-apid=%u pon=%#x/%d (Home = volume down)\n",
