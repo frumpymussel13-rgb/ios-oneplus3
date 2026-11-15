@@ -1,0 +1,60 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -1454,6 +1454,7 @@
+ static int32_t wl_txc_id = -1;                  /* last HTT tx completion: msdu id, status */
+ static uint16_t wl_txc_n;                       /* tx completions so far (data and management) */
+ static uint32_t wl_txc_status;
++static uint32_t wl_quirk, wl_mgmtpath, wl_rxmgmt, wl_rxbss, wl_nbcn, wl_nprobe;   /* boot-args sailfishq / sailfishmgmt; mgmt frames seen */
+ static uint8_t wl_eapol[512];                   /* last EAPOL-Key frame received */
+ static uint32_t wl_eapol_len;
+ static bool wl_net_up;                          /* connected: data frames go to the IOKit interface */
+@@ -1848,6 +1849,12 @@
+ 			printf("SAILFISH WLAN: reg caps: eeprom rd %#x ext %#x regcap %#x/%#x modes %#x 2g %u-%u 5g %u-%u\n",
+ 			    le32(v), le32(v + 4), le32(v + 8), le32(v + 12), le32(v + 16), le32(v + 20), le32(v + 24), le32(v + 28),
+ 			    le32(v + 32));
++		} else if (tag == 0x10u && len >= 12) {
++			printf("SAILFISH WLAN: service bitmap:");
++			for (uint32_t i = 0; i + 4 <= len && i < 40; i += 4) {
++				printf(" %08x", le32(v + i));
++			}
++			printf(" (MGMT_TX_WMI bit 76: %s)\n", (le32(v + 8) >> 12) & 1 ? "SET" : "clear");
+ 		} else if (tag == TAG_ARRAY_STRUC) {
+ 			for (uint32_t a = 0; a + 4 <= len;) {
+ 				uint32_t eh = le32(v + a), et = eh >> 16, el = eh & 0xffff;
+@@ -2065,7 +2072,8 @@
+ 		0x1u | 0x10u | 0x20u,                   /* PASSIVE, CHAN_STAT_EVENT, FILTER_PROBE_REQ (inverted in WMI-TLV) */
+ 	};
+ 	for (int i = 0; i < 15; i++) {
+-		*w++ = common[i];
++		/* quirk 64: scan flags 0x30, quirk 128: none (which bit means "passive" depends on the WMI flavour) */
++		*w++ = (i == 14 && (wl_quirk & 64)) ? 0x30u : (i == 14 && (wl_quirk & 128)) ? 0u : common[i];
+ 	}
+ 	*w++ = 0;                                       /* burst duration */
+ 	*w++ = WL_NCHAN;
+@@ -2115,10 +2123,18 @@
+ 				printf("SAILFISH WLAN: scan event %#x reason %u freq %u\n", e, reason, f);
+ 			}
+ 			done = e == 2;                  /* COMPLETED */
++			if (e == 2) {
++				printf("SAILFISH WLAN: scan done: %u beacons, %u probe responses so far\n", wl_nbcn, wl_nprobe);
++			}
+ 		} else if (ev == WMI_MGMT_RX_EVTID) {
+ 			mgmt++;
+ 			uint32_t snr = le32(&wl_msg[12]), ch = le32(&wl_msg[8]), flen = 0;
+ 			const uint8_t *fr = wl_mgmt_frame(&flen), *bssid = fr ? fr + 16 : NULL;
++			if (fr && fr[0] == 0x80) {
++				wl_nbcn++;
++			} else if (fr && fr[0] == 0x50) {
++				wl_nprobe++;
++			}
+ 			if (!fr || flen < 36 || (fr[0] != 0x80 && fr[0] != 0x50)) {
+ 				continue;                       /* beacons and probe responses only */
+ 			}
+@@ -2393,7 +2409,6 @@
+ }
+ 
+ /* Wait for a management frame of type fc from the BSS to us. */
+-static uint32_t wl_quirk, wl_mgmtpath, wl_rxmgmt, wl_rxbss;     /* boot-args sailfishq / sailfishmgmt; mgmt frames seen */
+ 
+ static const uint8_t *
+ wl_wait_mgmt(uint8_t fc, uint32_t ms, uint32_t *flen)
