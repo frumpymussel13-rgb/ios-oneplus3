@@ -1,0 +1,63 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -2966,10 +2966,14 @@
+ void sailfish_wlan_output(mbuf_t m);
+ uint32_t sailfish_wlan_log_gen;                 /* bumped on link changes: the Apple80211/ioctl logs start over (SailfishWLAN.cpp reads it) */
+ static uint32_t wl_out_logged;
++static volatile uint32_t wl_out_n;              /* frames iOS handed us since the last link change */
++static uint64_t wl_up_ms;                       /* when the link last came up */
++static uint32_t wl_nudges;
+ 
+ void
+ sailfish_wlan_output(mbuf_t m)
+ {
++	wl_out_n++;
+ 	if (wl_out_logged < 12) {                       /* first frames iOS sends: ethertype at offset 12 */
+ 		uint8_t eh[14] = { 0 };
+ 		wl_out_logged++;
+@@ -3398,6 +3402,9 @@
+ 	wl_net_up = up;
+ 	sailfish_wlan_log_gen++;
+ 	wl_out_logged = 0;
++	wl_out_n = 0;
++	wl_nudges = 0;
++	wl_up_ms = up ? wl_ms() : 0;
+ 	sailfish_wlan_iokit_link(up);
+ 	ev[0] = !up;
+ 	memcpy(ev + 4, &rssi, 4);
+@@ -3605,6 +3612,35 @@
+ 				wl_msleep(1000);
+ 			}
+ 		}
++		/*
++		 * Connected but iOS sends nothing (no DHCP): configd sometimes never
++		 * takes up the new link (logs/join7.txt; join6 had the same driver
++		 * and got DHCP). 5 s: wifid's link events again; 15 s and 35 s: link
++		 * down/up for the BSD interface (KEV_DL_LINK_OFF/ON), events again.
++		 */
++		if (wl_net_up && !wl_out_n && wl_up_ms && wl_nudges < 3) {
++			static const uint32_t at[3] = { 5000, 15000, 35000 };
++			if (wl_ms() - wl_up_ms >= at[wl_nudges]) {
++				uint8_t ev[32] = { 0 };
++				int32_t rssi = (int)wl_bss.snr + WL_NOISE_DBM;
++				uint16_t snr = (uint16_t)wl_bss.snr, noise = (uint16_t)WL_NOISE_DBM;
++				memcpy(ev + 4, &rssi, 4);
++				memcpy(ev + 8, &snr, 2);
++				memcpy(ev + 10, &noise, 2);
++				printf("SAILFISH WLAN: connected %u s and iOS sent nothing: %s\n", at[wl_nudges] / 1000,
++				    wl_nudges ? "link down/up for configd + link events" : "link events again");
++				if (wl_nudges) {
++					sailfish_wlan_iokit_link(false);
++					wl_msleep(300);
++					sailfish_wlan_iokit_link(true);
++				}
++				sailfish_wlan_iokit_event(A80211_EV_SSID_CHANGED, NULL, 0);
++				sailfish_wlan_iokit_event(A80211_EV_BSSID_CHANGED, NULL, 0);
++				sailfish_wlan_iokit_event(A80211_EV_LINK_CHANGED, ev, sizeof(ev));
++				wl_nudges++;
++				sweet_log_kick();
++			}
++		}
+ 		if (wl_ms() >= next) {                  /* status every 10 s */
+ 			next += 10000;
+ 			printf("SAILFISH WLAN: run: tx %u (drop %u) rx %u, irqs %u, tx out %u, ifq %u, fw_ind %#x, ltssm %#x lnk %#x, %d.%d C (sensor %d.%d)\n", tx, txdrop,
