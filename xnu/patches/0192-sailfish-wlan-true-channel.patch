@@ -1,0 +1,29 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -2206,7 +2206,15 @@
+ 			net->ssid_len = 0;
+ 			char ssid[33] = "";
+ 			const uint8_t *rsn = NULL;
++			/* The firmware reports the channel the frame was heard on, which can be a neighbour of the AP's own; the beacon says
++			 * which one it is (DS parameter set, else HT operation primary channel). Joining the wrong one gets no reply. */
++			uint32_t dsch = 0, htch = 0;
+ 			for (uint32_t o = 36; o + 2 <= flen && o + 2 + fr[o + 1] <= flen; o += 2 + fr[o + 1]) {
++				if (fr[o] == 3 && fr[o + 1] == 1) {
++					dsch = fr[o + 2];
++				} else if (fr[o] == 61 && fr[o + 1] >= 1) {
++					htch = fr[o + 2];
++				}
+ 				if (fr[o] == 0 && fr[o + 1] <= 32 && !ssid[0]) {
+ 					net->ssid_len = fr[o + 1];
+ 					memcpy(net->ssid, fr + o + 2, fr[o + 1]);
+@@ -2218,6 +2226,10 @@
+ 					rsn = &fr[o];
+ 				}
+ 			}
++			if (dsch || htch) {
++				ch = dsch ? dsch : htch;
++				net->ch = ch;
++			}
+ 			/* Our network: prefer 2.4 GHz (no passive/DFS rules), then the stronger signal. */
+ 			if (!wl_net_up && wl_ssid[0] && strcmp(ssid, wl_ssid) == 0 && rsn &&
+ 			    (!wl_bss.found || (ch <= 14 && wl_bss.ch > 14) || ((ch <= 14) == (wl_bss.ch <= 14) && snr > wl_bss.snr))) {
