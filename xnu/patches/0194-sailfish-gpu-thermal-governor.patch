@@ -1,24 +1,9 @@
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
-@@ -2081,6 +2081,13 @@
- 				    "S2 825 mV, GPLL0/1.5");
- 				if (ok) {
- 					api_selftest();
-+					g_cur_mhz = mhz;
-+					int thermal = 1;
-+					(void)PE_parse_boot_argn("sweetthermal", &thermal, sizeof(thermal));
-+					thread_t tt;
-+					if (thermal && kernel_thread_start(thermal_thread, (void *)(uintptr_t)mhz, &tt) == KERN_SUCCESS) {
-+						thread_deallocate(tt);
-+					}
- 				}
- 			} else {
- 				printf("SWEET GPU: full-screen quad %llu us at 300 MHz\n", us300);
-@@ -2111,6 +2118,109 @@
- 		}
- 	}
+@@ -1750,6 +1750,110 @@
+ 	return gfx_clock(mhz == 600 ? 1 : 2);
  }
-+
+ 
 +/*
 + * Thermal governor (boot-arg sweetthermal=0 turns it off, sweettlimit=C sets the first limit, default 72):
 + * the GPU runs at its top clock and steps 600 -> 400 -> 300 -> 200 MHz when the hottest TSENS sensor
@@ -121,6 +106,22 @@
 +		}
 +	}
 +}
++
++
  
- static void
- gpu_thread(void *arg, wait_result_t result)
+ /* Full-screen (750x1334, pitch 3072) source-over quads: average us of 5. */
+ static uint64_t
+@@ -2081,6 +2185,13 @@
+ 				    "S2 825 mV, GPLL0/1.5");
+ 				if (ok) {
+ 					api_selftest();
++					g_cur_mhz = mhz;
++					int thermal = 1;
++					(void)PE_parse_boot_argn("sweetthermal", &thermal, sizeof(thermal));
++					thread_t tt;
++					if (thermal && kernel_thread_start(thermal_thread, (void *)(uintptr_t)mhz, &tt) == KERN_SUCCESS) {
++						thread_deallocate(tt);
++					}
+ 				}
+ 			} else {
+ 				printf("SWEET GPU: full-screen quad %llu us at 300 MHz\n", us300);
