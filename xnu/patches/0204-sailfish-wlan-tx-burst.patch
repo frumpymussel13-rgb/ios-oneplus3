@@ -1,0 +1,64 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -2958,7 +2958,7 @@
+  * Frames from the stack (SailfishWLAN::outputPacket): only queued here,
+  * the Wi-Fi thread converts and sends them (wl_run).
+  */
+-#define WL_IFQ 64u
++#define WL_IFQ 256u                             /* 64 overflowed under iOS's background traffic (logs/join9.txt: ifq 64, 2-4 s pings) */
+ static lck_mtx_t *wl_ifq_lock;
+ static mbuf_t wl_ifq[WL_IFQ];
+ static uint32_t wl_ifq_head, wl_ifq_count;
+@@ -2966,6 +2966,7 @@
+ void sailfish_wlan_output(mbuf_t m);
+ uint32_t sailfish_wlan_log_gen;                 /* bumped on link changes: the Apple80211/ioctl logs start over (SailfishWLAN.cpp reads it) */
+ static uint32_t wl_out_logged;
++static uint32_t wl_ifq_over;                    /* frames dropped: queue full */
+ static volatile uint32_t wl_out_n;              /* frames iOS handed us since the last link change */
+ static uint64_t wl_up_ms;                       /* when the link last came up */
+ static uint32_t wl_nudges;
+@@ -2983,6 +2984,9 @@
+ 	}
+ 	lck_mtx_lock(wl_ifq_lock);
+ 	if (wl_ifq_count == WL_IFQ || !wl_net_up) {
++		if (wl_net_up) {
++			wl_ifq_over++;
++		}
+ 		lck_mtx_unlock(wl_ifq_lock);
+ 		mbuf_freem(m);
+ 		return;
+@@ -3643,11 +3647,13 @@
+ 		}
+ 		if (wl_ms() >= next) {                  /* status every 10 s */
+ 			next += 10000;
+-			printf("SAILFISH WLAN: run: tx %u (drop %u) rx %u, irqs %u, tx out %u, ifq %u, fw_ind %#x, ltssm %#x lnk %#x, %d.%d C (sensor %d.%d)\n", tx, txdrop,
++			printf("SAILFISH WLAN: run: tx %u (drop %u, queue full %u) rx %u, irqs %u, tx out %u, ifq %u, fw_ind %#x, ltssm %#x lnk %#x, %d.%d C (sensor %d.%d)\n", tx, txdrop, wl_ifq_over,
+ 			    wl_htt_rx - rx0, wl_irqs, (uint32_t)__builtin_popcount(wl_slot_busy), wl_ifq_count, rd(wl_bar, Q_FW_IND),
+ 			    rd(wl_dbi, 0x728) & 0x3fu, rd(wl_dbi, DBI_LINK_STATUS) >> 16, wl_temp() / 10, (wl_temp() % 10 + 10) % 10,
+ 			    wl_temp_max_id / 16, wl_temp_max_id % 16);
+ 		}
++		/* Up to 32 queued frames per pass (one per pass capped tx far below the link). */
++		for (int burst = 0; burst < 32; burst++) {
+ 		mbuf_t m = NULL;
+ 		lck_mtx_lock(wl_ifq_lock);
+ 		if (wl_ifq_count) {
+@@ -3656,7 +3662,10 @@
+ 			wl_ifq_count--;
+ 		}
+ 		lck_mtx_unlock(wl_ifq_lock);
+-		if (m) {
++		if (!m) {
++			break;
++		}
++		{
+ 			size_t len = mbuf_pkthdr_len(m);
+ 			if (len > ETHER_HDR_LEN && len <= sizeof(fr) && mbuf_copydata(m, 0, len, fr) == 0) {
+ 				if (wl_data_tx(fr, (uint16_t)(fr[12] << 8 | fr[13]), fr + ETHER_HDR_LEN, (uint32_t)(len - ETHER_HDR_LEN))) {
+@@ -3669,6 +3678,7 @@
+ 			}
+ 			mbuf_freem(m);
+ 		}
++		}
+ 		if (drop && wl_ms() >= drop) {
+ 			static uint8_t f[32];
+ 			uint32_t dn = wl_hdr(f, 0xc0, 0, wl_bss.bssid);
