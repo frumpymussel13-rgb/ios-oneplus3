@@ -1,0 +1,52 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -1454,7 +1454,7 @@
+ static int32_t wl_txc_id = -1;                  /* last HTT tx completion: msdu id, status */
+ static uint16_t wl_txc_n;                       /* tx completions so far (data and management) */
+ static uint32_t wl_txc_status;
+-static uint32_t wl_rd, wl_rdv, wl_quirk, wl_mgmtpath, wl_rxmgmt, wl_rxbss, wl_nbcn, wl_nprobe;   /* boot-args sailfishq / sailfishmgmt; mgmt frames seen */
++static uint32_t wl_pp, wl_cm, wl_pw, wl_rd, wl_rdv, wl_quirk, wl_mgmtpath, wl_rxmgmt, wl_rxbss, wl_nbcn, wl_nprobe;   /* boot-args sailfishq / sailfishmgmt; mgmt frames seen */
+ static uint8_t wl_eapol[512];                   /* last EAPOL-Key frame received */
+ static uint32_t wl_eapol_len;
+ static bool wl_net_up;                          /* connected: data frames go to the IOKit interface */
+@@ -2080,6 +2080,30 @@
+ 			(void)wl_htc_poll(10);
+ 		}
+ 	}
++	if (wl_pp) {
++		/*
++		 * boot-arg sailfishpp (2: param, value; 3: pdev id, param, value), sailfishcm (chain mask, default 3), sailfishpw (txpower limit,
++		 * default 60 = 30 dBm in 0.5 dB): the pdev parameters ath10k sets right after init. The firmware's receive path works, but the
++		 * radio never transmits: a zero tx chain mask or tx power limit would do that.
++		 */
++		uint32_t cm = wl_cm ? wl_cm : 3, pw = wl_pw ? wl_pw : 60;
++		static const uint32_t ids[4] = { 1, 2, 3, 4 };      /* TX_CHAIN_MASK, RX_CHAIN_MASK, TXPOWER_LIMIT2G, TXPOWER_LIMIT5G */
++		const uint32_t vals[4] = { cm, cm, pw, pw };
++		for (int i = 0; i < 4; i++) {
++			uint32_t *w2 = w0;
++			*w2++ = 0x4003u;
++			w2 = wl_tlv(w2, 0x52u, wl_pp * 4);
++			if (wl_pp == 3) {
++				*w2++ = 0;
++			}
++			*w2++ = ids[i];
++			*w2++ = vals[i];
++			printf("SAILFISH WLAN: pdev param %u = %u (%u words): %s\n", ids[i], vals[i], wl_pp, wl_wmi_send(w2) ? "sent" : "FAILED");
++			for (int k = 0; k < 5; k++) {
++				(void)wl_htc_poll(10);
++			}
++		}
++	}
+ 	ready = true;
+ 
+ scan:
+@@ -3838,6 +3862,9 @@
+ 	(void)PE_parse_boot_argn("sailfishdrop", &wl_drop_test, sizeof(wl_drop_test));
+ 	(void)PE_parse_boot_argn("sailfishq", &wl_quirk, sizeof(wl_quirk));
+ 	(void)PE_parse_boot_argn("sailfishrd", &wl_rd, sizeof(wl_rd));
++	(void)PE_parse_boot_argn("sailfishpp", &wl_pp, sizeof(wl_pp));
++	(void)PE_parse_boot_argn("sailfishcm", &wl_cm, sizeof(wl_cm));
++	(void)PE_parse_boot_argn("sailfishpw", &wl_pw, sizeof(wl_pw));
+ 	(void)PE_parse_boot_argn("sailfishrdv", &wl_rdv, sizeof(wl_rdv));
+ 	(void)PE_parse_boot_argn("sailfishmgmt", &wl_mgmtpath, sizeof(wl_mgmtpath));
+ 	if (!on) {
