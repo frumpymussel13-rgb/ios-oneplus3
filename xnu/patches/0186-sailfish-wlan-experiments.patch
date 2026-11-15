@@ -1,0 +1,156 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -1607,8 +1607,8 @@
+ 				printf("SAILFISH WLAN: HTT msg type %u (%u bytes)\n", f[8], len - tl);
+ 			}
+ 			if (eid == wl_htt_ep && len - tl >= 1 && f[8] == 14) {
+-				printf("SAILFISH WLAN: HTT type 14 (%u bytes): %02x %02x %02x %02x %02x %02x %02x %02x\n", len - tl, f[8], f[9], f[10],
+-				    f[11], f[12], f[13], f[14], f[15]);
++				printf("SAILFISH WLAN: HTT type 14 (%u bytes): %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n", len - tl, f[8],
++				    f[9], f[10], f[11], f[12], f[13], f[14], f[15], f[16], f[17], f[18], f[19]);
+ 			}
+ 			if (eid == wl_htt_ep && len - tl >= 48 && f[8] == 1) {
+ 				/*
+@@ -2393,6 +2393,8 @@
+ }
+ 
+ /* Wait for a management frame of type fc from the BSS to us. */
++static uint32_t wl_quirk, wl_mgmtpath, wl_rxmgmt, wl_rxbss;     /* boot-args sailfishq / sailfishmgmt; mgmt frames seen */
++
+ static const uint8_t *
+ wl_wait_mgmt(uint8_t fc, uint32_t ms, uint32_t *flen)
+ {
+@@ -2405,11 +2407,24 @@
+ 			if (wl_noisy(ev)) {
+ 				printf("SAILFISH WLAN: WMI event %#x (%u bytes)\n", ev, wl_msg_len);
+ 			}
++			static uint32_t dbgn;
++			if (ev == 0x1d011u && dbgn < 150) {            /* firmware debug log, raw */
++				dbgn++;
++				printf("SAILFISH WLAN: fwlog");
++				for (uint32_t i = 0; i < 64 && i < wl_msg_len; i += 4) {
++					printf(" %08x", le32(&wl_msg[i]));
++				}
++				printf("\n");
++			}
+ 			continue;
+ 		}
+ 		const uint8_t *fr = wl_mgmt_frame(flen);
+ 		static uint32_t seen;
+-		if (fr && fr[0] != 0x80 && fr[0] != 0x50 && seen < 60) {       /* not beacon / probe response */
++		wl_rxmgmt++;
++		if (fr && memcmp(fr + 10, wl_bss.bssid, 6) == 0) {
++			wl_rxbss++;
++		}
++		if (fr && ((fr[0] != 0x80 && fr[0] != 0x50) || memcmp(fr + 4, wl_mac, 6) == 0) && seen < 80) {     /* not beacon / probe response, or to us */
+ 			seen++;
+ 			printf("SAILFISH WLAN: rx mgmt fc %02x%02x len %u a1 %02x:%02x:%02x:%02x:%02x:%02x a2 %02x:%02x:%02x:%02x:%02x:%02x\n",
+ 			    fr[0], fr[1], *flen, fr[4], fr[5], fr[6], fr[7], fr[8], fr[9], fr[10], fr[11], fr[12], fr[13], fr[14], fr[15]);
+@@ -2443,9 +2458,9 @@
+ static uint32_t wl_mgmt_n;
+ 
+ static bool
+-wl_wmi_mgmt_tx(const uint8_t *fr, uint32_t len)
++wl_wmi_mgmt_tx(const uint8_t *fr, uint32_t len, bool seven)
+ {
+-	uint32_t fo = D_TXF + 2048 * ((uint32_t)(wl_tx_id + 1) % WL_TXSLOTS), nw = (wl_mgmt_n & 1) ? 7 : 8;
++	uint32_t fo = D_TXF + 2048 * ((uint32_t)(wl_tx_id + 1) % WL_TXSLOTS), nw = seven ? 7 : 8;
+ 	uint32_t inl = len < 64 ? len : 64, ch = wl_bss.ch, freq = ch <= 14 ? 2407 + 5 * ch : 5000 + 5 * ch;
+ 	memcpy((void *)(wl_dma + fo), fr, len);
+ 	uint32_t *w = wl_wmi_begin(WMI_MGMT_TX_SEND_CMDID, TAG_MGMT_TX_SEND, 4 * nw);
+@@ -2470,8 +2485,9 @@
+ wl_htt_tx(const uint8_t *fr, uint32_t len, bool mgmt)
+ {
+ 	static uint32_t sel;
+-	if (mgmt && (sel++ % 3) != 0) {              /* diagnosis: HTT, WMI 8 words, WMI 7 words in turn */
+-		return wl_wmi_mgmt_tx(fr, len);
++	uint32_t path = wl_mgmtpath ? wl_mgmtpath - 1 : sel++ % 3;     /* boot-arg sailfishmgmt: 1 HTT, 2 WMI 8 words, 3 WMI 7 words; 0 in turn */
++	if (mgmt && path != 0) {
++		return wl_wmi_mgmt_tx(fr, len, path == 2);
+ 	}
+ 	if (mgmt) {
+ 		printf("SAILFISH WLAN: mgmt tx via HTT fc %02x%02x len %u\n", fr[0], fr[1], len);
+@@ -3446,6 +3462,10 @@
+ 	uint32_t *w = wl_wmi_begin(WMI_VDEV_START_CMDID, TAG_VDEV_START, 72);
+ 	w[2] = 100;                                     /* beacon interval, DTIM 1 */
+ 	w[3] = 1;
++	if (wl_quirk & 4) {                             /* quirk 4: SSID in the vdev start */
++		w[5] = (uint32_t)strlen(wl_ssid);
++		memcpy(&w[6], wl_ssid, strlen(wl_ssid));
++	}
+ 	w = wl_tlv(w + 18, TAG_CHANNEL, 24);
+ 	w[0] = freq;
+ 	w[1] = freq;
+@@ -3460,11 +3480,38 @@
+ 	printf("SAILFISH WLAN: vdev start: status %u\n", le32(&wl_msg[8 + 12]));
+ 	uint32_t pc[4] = { 0, 0, 0, 0 };
+ 	wl_put_mac(&pc[1], wl_bss.bssid);
+-	if (!wl_wmi_simple(WMI_PEER_CREATE_CMDID, TAG_PEER_CREATE, pc, 4)) {
+-		return false;
++	if (!(wl_quirk & 1)) {                          /* quirk 1: peer after auth */
++		if (!wl_wmi_simple(WMI_PEER_CREATE_CMDID, TAG_PEER_CREATE, pc, 4)) {
++			return false;
++		}
++		for (int i = 0; i < 20; i++) {
++			(void)wl_htc_poll(10);          /* HTT PEER_MAP */
++		}
+ 	}
+-	for (int i = 0; i < 20; i++) {
+-		(void)wl_htc_poll(10);                  /* HTT PEER_MAP */
++	if (wl_quirk & 2) {                             /* quirk 2: vdev up before auth */
++		uint32_t up0[4] = { 0, 0, 0, 0 };
++		wl_put_mac(&up0[2], wl_bss.bssid);
++		printf("SAILFISH WLAN: quirk 2: vdev up before auth: %s\n", wl_wmi_simple(WMI_VDEV_UP_CMDID, TAG_VDEV_UP, up0, 4) ? "sent" : "FAILED");
++	}
++	if (wl_quirk & 32) {                            /* quirk 32: directed probe request, expect a probe response to us */
++		static uint8_t pr[64];
++		uint32_t pn = wl_hdr(pr, 0x40, 0, wl_bss.bssid);
++		pr[pn++] = 0;
++		pr[pn++] = (uint8_t)strlen(wl_ssid);
++		memcpy(pr + pn, wl_ssid, strlen(wl_ssid));
++		pn += (uint32_t)strlen(wl_ssid);
++		pr[pn++] = 1;
++		pr[pn++] = 4;
++		pr[pn++] = 0x82;
++		pr[pn++] = 0x84;
++		pr[pn++] = 0x8b;
++		pr[pn++] = 0x96;
++		for (int i = 0; i < 6; i++) {
++			uint32_t rl0 = 0;
++			(void)wl_htt_tx(pr, pn, true);
++			const uint8_t *pq = wl_wait_mgmt(0x50, 300, &rl0);
++			printf("SAILFISH WLAN: probe test %d: %s (rx mgmt %u, from bssid %u)\n", i, pq ? "RESPONSE TO US" : "no response", wl_rxmgmt, wl_rxbss);
++		}
+ 	}
+ 
+ 	/* Up to 5 rounds of auth + assoc; a deauth first clears the AP's state of an earlier session. */
+@@ -3490,6 +3537,7 @@
+ 		}
+ 		rsp = wl_wait_mgmt(0xb0, 500, &rl);
+ 	}
++	printf("SAILFISH WLAN: after auth: mgmt rx events %u, from bssid %u\n", wl_rxmgmt, wl_rxbss);
+ 	uint32_t st = rsp && rl >= 30 ? (rsp[28] | rsp[29] << 8) : 0xffff;
+ 	printf("SAILFISH WLAN: auth: %s status %u (tx completion id %d status %u)\n", rsp ? "response" : "NO RESPONSE", st, wl_txc_id,
+ 	    wl_txc_status);
+@@ -3500,6 +3548,12 @@
+ 		return false;
+ 	}
+ 
++	if (wl_quirk & 1) {
++		(void)wl_wmi_simple(WMI_PEER_CREATE_CMDID, TAG_PEER_CREATE, pc, 4);
++		for (int i = 0; i < 20; i++) {
++			(void)wl_htc_poll(10);
++		}
++	}
+ 	wl_step("assoc");
+ 	static const uint8_t rates_g[12] = { 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c };
+ 	static const uint8_t rates_a[8] = { 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c };
+@@ -3742,6 +3796,8 @@
+ 	(void)PE_parse_boot_argn("sailfishssid", wl_ssid, sizeof(wl_ssid));
+ 	(void)PE_parse_boot_argn("sailfishpsk", wl_psk, sizeof(wl_psk));
+ 	(void)PE_parse_boot_argn("sailfishdrop", &wl_drop_test, sizeof(wl_drop_test));
++	(void)PE_parse_boot_argn("sailfishq", &wl_quirk, sizeof(wl_quirk));
++	(void)PE_parse_boot_argn("sailfishmgmt", &wl_mgmtpath, sizeof(wl_mgmtpath));
+ 	if (!on) {
+ 		return;
+ 	}
