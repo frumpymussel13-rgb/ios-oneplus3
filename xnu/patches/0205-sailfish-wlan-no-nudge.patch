@@ -1,0 +1,44 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -3617,33 +3617,15 @@
+ 			}
+ 		}
+ 		/*
+-		 * Connected but iOS sends nothing (no DHCP): configd sometimes never
+-		 * takes up the new link (logs/join7.txt; join6 had the same driver
+-		 * and got DHCP). 5 s: wifid's link events again; 15 s and 35 s: link
+-		 * down/up for the BSD interface (KEV_DL_LINK_OFF/ON), events again.
++		 * Connected but iOS sent nothing yet: only log it (once, at 20 s).
++		 * 0203 re-posted wifid's link events at 5 s, which arrived while
++		 * wifid was still in its post-join scans and made it leave
++		 * (logs/join10.txt), so the driver no longer pokes iOS here.
+ 		 */
+-		if (wl_net_up && !wl_out_n && wl_up_ms && wl_nudges < 3) {
+-			static const uint32_t at[3] = { 5000, 15000, 35000 };
+-			if (wl_ms() - wl_up_ms >= at[wl_nudges]) {
+-				uint8_t ev[32] = { 0 };
+-				int32_t rssi = (int)wl_bss.snr + WL_NOISE_DBM;
+-				uint16_t snr = (uint16_t)wl_bss.snr, noise = (uint16_t)WL_NOISE_DBM;
+-				memcpy(ev + 4, &rssi, 4);
+-				memcpy(ev + 8, &snr, 2);
+-				memcpy(ev + 10, &noise, 2);
+-				printf("SAILFISH WLAN: connected %u s and iOS sent nothing: %s\n", at[wl_nudges] / 1000,
+-				    wl_nudges ? "link down/up for configd + link events" : "link events again");
+-				if (wl_nudges) {
+-					sailfish_wlan_iokit_link(false);
+-					wl_msleep(300);
+-					sailfish_wlan_iokit_link(true);
+-				}
+-				sailfish_wlan_iokit_event(A80211_EV_SSID_CHANGED, NULL, 0);
+-				sailfish_wlan_iokit_event(A80211_EV_BSSID_CHANGED, NULL, 0);
+-				sailfish_wlan_iokit_event(A80211_EV_LINK_CHANGED, ev, sizeof(ev));
+-				wl_nudges++;
+-				sweet_log_kick();
+-			}
++		if (wl_net_up && !wl_out_n && wl_up_ms && !wl_nudges && wl_ms() - wl_up_ms >= 20000) {
++			printf("SAILFISH WLAN: connected 20 s and iOS sent nothing (no DHCP yet)\n");
++			wl_nudges = 1;
++			sweet_log_kick();
+ 		}
+ 		if (wl_ms() >= next) {                  /* status every 10 s */
+ 			next += 10000;
