@@ -1,0 +1,54 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -4068,8 +4068,20 @@
+ 			ok = wl_stage3();
+ 			printf("SAILFISH WLAN: stage 3 %s\n", ok ? "done: WMI ready" : "FAILED");
+ 			/* The interface appears with the MAC (link down until connected); IOKit may go quiet. */
+-			if (!sailfish_wlan_iokit_attach(ok ? wl_mac : NULL)) {
+-				printf("SAILFISH WLAN: no SailfishWLAN IOKit service\n");
++			/* IOKit start() may still be running: wait for it up to 60 s, not just once. */
++			{
++				int w = 0;
++				while (!sailfish_wlan_iokit_attach(ok ? wl_mac : NULL) && w < 120) {
++					if (w++ == 0) {
++						printf("SAILFISH WLAN: SailfishWLAN IOKit service not started yet, waiting\n");
++					}
++					wl_msleep(500);
++				}
++				if (w >= 120) {
++					printf("SAILFISH WLAN: no SailfishWLAN IOKit service after 60 s\n");
++				} else if (w) {
++					printf("SAILFISH WLAN: IOKit service came up after %d ms\n", w * 500);
++				}
+ 			}
+ 			if (ok) {
+ 				bool found = wl_scan();
+--- a/iokit/Kernel/arm/SailfishWLAN.cpp
++++ b/iokit/Kernel/arm/SailfishWLAN.cpp
+@@ -100,6 +100,7 @@
+ 	OSDeclareDefaultStructors(SailfishWLAN);
+ public:
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	UInt32 getFeatures(void) const APPLE_KEXT_OVERRIDE;
+ 	bool createWorkLoop(void) APPLE_KEXT_OVERRIDE;
+ 	IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE;
+ 	IOReturn enable(IONetworkInterface *netif) APPLE_KEXT_OVERRIDE;
+@@ -155,6 +156,18 @@
+ 	return true;
+ }
+ 
++/*
++ * No wait for the IOBSD resource in IONetworkController::start: when IOKit
++ * matched us before BSD was up, that wait never returned (logs/boot17.txt,
++ * boot20.txt: "start" without "started", grayed-out Wi-Fi switch). start()
++ * needs no mbufs; the interface is attached later from the radio thread.
++ */
++UInt32
++SailfishWLAN::getFeatures(void) const
++{
++	return super::getFeatures() | kIONetworkFeatureNoBSDWait;
++}
++
+ bool
+ SailfishWLAN::createWorkLoop(void)
+ {
