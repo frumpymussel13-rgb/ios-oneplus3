@@ -1,0 +1,69 @@
+--- a/bsd/dev/sailfish_wlan.c
++++ b/bsd/dev/sailfish_wlan.c
+@@ -2003,6 +2003,15 @@
+ 	uint8_t ie[1024];
+ } wl_nets[WL_NETS];
+ static uint32_t wl_nnets, wl_scan_next;         /* entries; next one SCAN_RESULT returns */
++/*
++ * The joined network's record, kept from the join's scan. CURRENT_NETWORK
++ * answers from it, and a scan while connected that missed our own AP gets it
++ * added: wifid's post-join scans replace wl_nets, and an AP absent from them
++ * made CURRENT_NETWORK fail while connected (channel 11 AP: never DHCP,
++ * logs/join5,7,10,11; channel 6 AP: DHCP, join6,9).
++ */
++static struct wl_net wl_cur;
++static bool wl_cur_ok;
+ static volatile bool wl_scan_req;               /* wifid asked for a scan (SCAN_REQ): wl_run does it */
+ 
+ /* wifid's join / leave / power requests for the Wi-Fi thread (under wl_ifq_lock), and their state. */
+@@ -2257,6 +2266,16 @@
+ 		}
+ 	}
+ 	wl_scan_next = 0;
++	if (wl_net_up && wl_cur_ok) {
++		bool have = false;
++		for (unsigned i = 0; i < wl_nnets && !have; i++) {
++			have = memcmp(wl_nets[i].bssid, wl_cur.bssid, 6) == 0;
++		}
++		if (!have && wl_nnets < WL_NETS) {
++			wl_nets[wl_nnets++] = wl_cur;
++		}
++		printf("SAILFISH WLAN: scan while connected: our AP %s\n", have ? "heard" : "not heard, added from the join");
++	}
+ 	printf("SAILFISH WLAN: scan %s: %u networks, %u mgmt rx events, %u HTT rx MSDUs\n", done ? "complete" : "TIMEOUT", nseen, mgmt, wl_htt_rx);
+ 	for (unsigned i = 0; i < nhist && !quiet; i++) {
+ 		printf("SAILFISH WLAN: event %#x x %u\n", hist_id[i], hist_n[i]);
+@@ -3269,6 +3288,15 @@
+ 		case A80211_SCAN_RESULT:                /* next record of the last scan, EIO after the last */
+ 		case A80211_CURRENT_NETWORK:            /* the joined BSS as a scan record */
+ 			err = type == A80211_SCAN_RESULT ? EIO : ENXIO;
++			if (type == A80211_CURRENT_NETWORK && up && wl_cur_ok) {
++				bzero(r, sizeof(r));
++				wl_a80211_asr(r, &wl_cur);
++				err = copyout(r, data, *len < sizeof(r) ? *len : sizeof(r));
++				break;
++			}
++			if (type == A80211_CURRENT_NETWORK && up) {
++				printf("SAILFISH 80211: CURRENT_NETWORK while connected but no record\n");
++			}
+ 			for (uint32_t i = type == A80211_SCAN_RESULT ? wl_scan_next : 0; i < wl_nnets; i++) {
+ 				if (type == A80211_CURRENT_NETWORK && (!up || memcmp(wl_nets[i].bssid, wl_bss.bssid, 6) != 0)) {
+ 					continue;
+@@ -3953,6 +3981,17 @@
+ 		return false;
+ 	}
+ 	sweet_log_kick();
++	wl_cur_ok = false;
++	for (uint32_t i = 0; i < wl_nnets; i++) {
++		if (memcmp(wl_nets[i].bssid, wl_bss.bssid, 6) == 0) {
++			wl_cur = wl_nets[i];
++			wl_cur_ok = true;
++			break;
++		}
++	}
++	if (!wl_cur_ok) {
++		printf("SAILFISH WLAN: joined BSS not in the scan list: CURRENT_NETWORK will fail\n");
++	}
+ 	wl_link_changed(true, false);                   /* configd's IPConfiguration runs DHCP now */
+ 	sweet_log_kick();
+ 	return true;
